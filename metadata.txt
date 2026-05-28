@@ -1,0 +1,21 @@
+[general]
+name=Fcloud Shizuoka
+qgisMinimumVersion=3.14
+description=Shizuoka Prefecture Forest Cloud information viewer. Links forest planning map (GeoPackage) with the Shizuoka Forest Cloud API to display forest register details, protective forest records, and project data.
+version=0.1.0
+author=Hideharu Masai
+email=hideharumasai@void.mints.ne.jp
+about=Displays forest information from the Shizuoka Prefecture Forest Cloud public system, linked to GeoPackage data created by Shinrinbo Code Converter. Provides a dock panel for browsing forest stand attributes, protective forest records, and forest management data. This plugin is specific to Shizuoka Prefecture. / Support: https://paypal.me/rawslnc
+about[ja]=静岡県森林クラウドの公開システムと連携し、Shinrinbo Code Converter で作成した GeoPackage データに基づいて林地情報を表示します。林小班属性・保安林記録・経営計画作成箇所をドックパネルで閲覧できます。本プラグインは静岡県専用です。 / Support: https://paypal.me/rawslnc
+changelog=
+    0.1.0 - Initial release
+category=Vector
+tags=python,forest,shinrinbo,shizuoka,forest-cloud,vector,japan
+repository=https://github.com/raw-slnc/fcloud_shizuoka
+tracker=https://github.com/raw-slnc/fcloud_shizuoka/issues
+homepage=https://github.com/raw-slnc/fcloud_shizuoka
+icon=icon.png
+experimental=True
+deprecated=False
+hasProcessingProvider=no
+server=False

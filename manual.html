@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fcloud Shizuoka — 操作マニュアル</title>
+<style>
+  :root {
+    --green-dark:  #2d6a4f;
+    --green-mid:   #40916c;
+    --green-light: #d8f3dc;
+    --green-pale:  #f0faf2;
+    --accent:      #1b4332;
+    --text:        #1a1a2e;
+    --muted:       #6c757d;
+    --border:      #c8e6c9;
+    --white:       #ffffff;
+    --sidebar-w:   240px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', 'Meiryo UI', Meiryo, sans-serif;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--green-pale);
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* ── サイドバー ── */
+  nav {
+    width: var(--sidebar-w);
+    min-height: 100vh;
+    background: var(--green-dark);
+    color: var(--white);
+    position: fixed;
+    top: 0; left: 0;
+    overflow-y: auto;
+    padding-bottom: 40px;
+  }
+
+  nav .logo {
+    padding: 20px 16px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+    line-height: 1.5;
+  }
+  nav .logo span { display: block; font-size: 10px; font-weight: normal; opacity: 0.7; margin-top: 2px; }
+
+  nav ul { list-style: none; padding: 8px 0; }
+  nav ul li a {
+    display: block;
+    padding: 8px 16px;
+    color: rgba(255,255,255,0.85);
+    text-decoration: none;
+    font-size: 13px;
+    transition: background 0.15s;
+    border-left: 3px solid transparent;
+  }
+  nav ul li a:hover { background: rgba(255,255,255,0.1); border-left-color: var(--green-light); color: #fff; }
+  nav ul li.section {
+    padding: 14px 16px 4px;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.5;
+  }
+  nav ul li.sub a { padding-left: 28px; font-size: 12px; }
+
+  /* ── メインコンテンツ ── */
+  main {
+    margin-left: var(--sidebar-w);
+    padding: 40px 48px;
+    max-width: 900px;
+    flex: 1;
+  }
+
+  h1 { font-size: 26px; color: var(--accent); margin-bottom: 6px; }
+  h2 { font-size: 19px; color: var(--green-dark); margin: 40px 0 14px; padding-bottom: 6px; border-bottom: 2px solid var(--border); }
+  h3 { font-size: 15px; color: var(--green-dark); margin: 24px 0 10px; }
+  h4 { font-size: 13px; color: var(--accent); margin: 16px 0 6px; }
+
+  p { line-height: 1.75; margin-bottom: 10px; }
+  ul, ol { padding-left: 20px; margin-bottom: 10px; }
+  li { line-height: 1.75; }
+
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 30px; }
+
+  /* ── カード ── */
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+  }
+  .card-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  .card-row .card { flex: 1; min-width: 200px; margin-bottom: 0; }
+
+  /* ── 注意・ヒントボックス ── */
+  .note, .tip, .warn {
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 14px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .note  { background: #e8f4fd; border-left: 4px solid #2196f3; }
+  .tip   { background: var(--green-light); border-left: 4px solid var(--green-mid); }
+  .warn  { background: #fff3e0; border-left: 4px solid #ff9800; }
+  .note::before { content: '📌 '; }
+  .tip::before  { content: '💡 '; }
+  .warn::before { content: '⚠️ '; }
+
+  /* ── UI図解（CSSレイアウト） ── */
+  .ui-diagram {
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+    margin: 16px 0 24px;
+    background: #f8f9fa;
+  }
+  .ui-diagram .ui-top { display: flex; border-bottom: 2px solid var(--border); }
+  .ui-left-panel {
+    width: 220px;
+    min-width: 220px;
+    border-right: 2px solid var(--border);
+    background: var(--white);
+  }
+  .ui-right-panel { flex: 1; background: var(--white); }
+  .ui-panel-header {
+    background: var(--green-light);
+    padding: 6px 10px;
+    font-weight: bold;
+    font-size: 11px;
+    color: var(--green-dark);
+    border-bottom: 1px solid var(--border);
+  }
+  .ui-panel-body { padding: 8px 10px; min-height: 100px; color: var(--muted); }
+  .ui-tab-bar {
+    display: flex;
+    background: #f0f0f0;
+    border-bottom: 1px solid var(--border);
+    padding: 0 6px;
+    gap: 2px;
+  }
+  .ui-tab {
+    padding: 5px 10px;
+    font-size: 11px;
+    border-radius: 4px 4px 0 0;
+    cursor: default;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .ui-tab.active {
+    background: var(--white);
+    color: var(--green-dark);
+    font-weight: bold;
+    border: 1px solid var(--border);
+    border-bottom: 1px solid var(--white);
+  }
+  .ui-bottom {
+    background: #f8f8f8;
+    border-top: 2px solid var(--border);
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .ui-btn {
+    background: #e0e0e0;
+    border: 1px solid #bbb;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: #333;
+  }
+  .ui-combo {
+    background: var(--white);
+    border: 1px solid #bbb;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: #333;
+  }
+
+  /* ── ハイライト凡例 ── */
+  .legend-table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  .legend-table th {
+    background: var(--green-light);
+    color: var(--green-dark);
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 12px;
+    border: 1px solid var(--border);
+  }
+  .legend-table td {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    vertical-align: middle;
+  }
+  .legend-table tr:nth-child(even) td { background: #fafafa; }
+
+  .swatch {
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+    border-radius: 3px;
+    vertical-align: middle;
+    margin-right: 6px;
+    border: 2px solid;
+  }
+  .sw-blue   { background: rgba(30,100,255,0.05);  border-color: rgba(30,100,255,0.8); }
+  .sw-yellow { background: rgba(210,170,0,0.08);   border-color: rgba(210,170,0,0.8); }
+  .sw-red    { background: rgba(220,50,50,0.05);   border-color: rgba(220,50,50,0.8); }
+  .sw-orange { background: rgba(255,140,0,0.05);   border-color: rgba(255,140,0,0.8); }
+  .sw-sel    { background: rgba(210,30,30,0.10);   border-color: rgba(210,30,30,0.85); }
+
+  /* ── フロー図 ── */
+  .flow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 12px 0;
+  }
+  .flow-step {
+    background: var(--green-light);
+    border: 1px solid var(--green-mid);
+    border-radius: 20px;
+    padding: 5px 14px;
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .flow-arrow { color: var(--green-mid); font-size: 16px; }
+
+  /* ── キーバッジ ── */
+  kbd {
+    background: #eee;
+    border: 1px solid #aaa;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 12px;
+    font-family: monospace;
+  }
+
+  /* ── テーブル ── */
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 13px; }
+  th { background: var(--green-light); color: var(--green-dark); padding: 8px 12px; text-align: left; border: 1px solid var(--border); }
+  td { padding: 7px 12px; border: 1px solid var(--border); }
+  tr:nth-child(even) td { background: #fafaf8; }
+
+  /* ── セクション区切り ── */
+  .section-anchor { display: block; height: 0; margin-top: -20px; padding-top: 20px; }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+  @media (max-width: 768px) {
+    nav { display: none; }
+    main { margin-left: 0; padding: 20px; }
+  }
+
+  @media print {
+    @page { size: A4; margin: 0.2in 0.3in; }
+
+    * {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    body {
+      display: block;
+      background: #fff;
+      font-size: 10pt;
+      min-height: auto;
+    }
+
+    nav { display: none; }
+
+    main {
+      margin-left: 0;
+      max-width: none;
+      padding: 0;
+    }
+
+    .card,
+    .card-row,
+    .ui-diagram,
+    .legend-table,
+    table {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    h2, h3, h4 {
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── サイドバーナビ ── -->
+<nav>
+  <div class="logo">
+    Fcloud Shizuoka
+    <span>静岡県森林クラウド連携プラグイン</span>
+  </div>
+  <ul>
+    <li class="section">はじめに</li>
+    <li><a href="#overview">概要</a></li>
+    <li><a href="#requirements">動作要件</a></li>
+    <li><a href="#install">インストール</a></li>
+    <li class="section">基本操作</li>
+    <li><a href="#ui">画面構成</a></li>
+    <li><a href="#connect">GPKGレイヤー接続</a></li>
+    <li class="section">各タブ</li>
+    <li class="sub"><a href="#hoanrin">保安林台帳</a></li>
+    <li class="sub"><a href="#mori">森の力</a></li>
+    <li class="sub"><a href="#keikaku">経営計画</a></li>
+    <li class="sub"><a href="#rinchi">林地開発</a></li>
+    <li class="section">機能解説</li>
+    <li><a href="#highlight">ハイライト凡例</a></li>
+    <li><a href="#cache">キャッシュ機能</a></li>
+    <li><a href="#layers">レイヤー追加</a></li>
+  </ul>
+</nav>
+
+<!-- ── メインコンテンツ ── -->
+<main>
+
+  <h1>Fcloud Shizuoka 操作マニュアル</h1>
+  <p class="subtitle">バージョン 0.1.0 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
+
+  <!-- ── 概要 ── -->
+  <span class="section-anchor" id="overview"></span>
+  <h2>概要</h2>
+  <p>
+    <strong>Fcloud Shizuoka</strong> は、静岡県森林クラウド（fcloud.pref.shizuoka.jp）の公開APIと、
+    Shinrinbo Code Converter が生成した森林簿 GeoPackage を連携させる QGIS プラグインです。
+    ドックパネルから保安林台帳・森の力再生事業・経営計画・林地開発の情報を検索・閲覧し、
+    地図上でフィーチャーをハイライト表示できます。
+  </p>
+
+  <div class="card-row">
+    <div class="card">
+      <h4>できること</h4>
+      <ul>
+        <li>保安林台帳の地番照合・ハイライト表示</li>
+        <li>森の力再生事業の検索・実施箇所レイヤー表示</li>
+        <li>経営計画の読み込み・計画箇所レイヤー表示</li>
+        <li>林地開発（許可・連絡調整）の検索</li>
+        <li>API取得データのローカルキャッシュ</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>対象データ</h4>
+      <ul>
+        <li>静岡県内の森林簿 GeoPackage（静岡県のみ対応）</li>
+        <li>静岡県森林クラウド公開API</li>
+        <li>MVT（Mapbox Vector Tiles）形式の地理データ</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── 動作要件 ── -->
+  <span class="section-anchor" id="requirements"></span>
+  <h2>動作要件</h2>
+  <table>
+    <tr><th>項目</th><th>要件</th></tr>
+    <tr><td>QGIS バージョン</td><td>3.14 以上</td></tr>
+    <tr><td>動作確認環境</td><td>QGIS 3.40.10（Windows・Linux）</td></tr>
+    <tr><td>インターネット接続</td><td>必須（API・MVTタイルへのアクセス）</td></tr>
+    <tr><td>GeoPackage</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ</td></tr>
+    <tr><td>対象地域</td><td>静岡県内のみ</td></tr>
+  </table>
+
+  <!-- ── インストール ── -->
+  <span class="section-anchor" id="install"></span>
+  <h2>インストール</h2>
+
+  <div class="warn">
+    v0.1.0 はテスト版です。QGIS 公式リポジトリには未登録のため、ZIP ファイルから手動でインストールします。
+  </div>
+
+  <h3>ZIP からのインストール手順</h3>
+  <ol>
+    <li>配布された <code>fcloud_shizuoka.zip</code> をダウンロードする</li>
+    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
+    <li>左側の「ZIP からインストール」タブを選択する</li>
+    <li>「…」ボタンで先ほどの ZIP ファイルを選択し、<strong>プラグインをインストール</strong> をクリックする</li>
+    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
+  </ol>
+
+  <div class="tip">
+    インストール直後はドックパネルが非表示です。ツールバーのアイコン、またはメニュー
+    <strong>ベクタ → 静岡県森林クラウド</strong> をクリックして表示します。
+  </div>
+
+  <h3>アップデート</h3>
+  <p>
+    新しい ZIP が配布された場合は、同じ手順で上書きインストールできます。
+    または <strong>プラグインの管理とインストール → インストール済み</strong> から
+    <code>Fcloud Shizuoka</code> を一度アンインストールしてから再インストールしてください。
+  </p>
+
+  <!-- ── 画面構成 ── -->
+  <span class="section-anchor" id="ui"></span>
+  <h2>画面構成</h2>
+
+  <div class="ui-diagram">
+    <div class="ui-top">
+      <!-- 左パネル -->
+      <div class="ui-left-panel">
+        <div class="ui-panel-header">左パネル（情報表示）</div>
+        <div style="padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 11px; display:flex; align-items:center; gap:6px;">
+          <span style="color:var(--muted);">GPKGレイヤー:</span>
+          <span class="ui-combo">forest_1.gpkg ▾</span>
+        </div>
+        <div class="ui-tab-bar">
+          <div class="ui-tab active">選択中の小班</div>
+          <div class="ui-tab">クラウド情報</div>
+        </div>
+        <div class="ui-panel-body" style="font-size:11px;">
+          <div style="color:var(--green-dark); font-weight:bold; margin-bottom:6px;">小班: 001-001-A</div>
+          <div style="color:var(--muted);">市町村 ／ 林班 ／ 樹種 ／ 林齢<br>施業履歴 など…</div>
+        </div>
+      </div>
+      <!-- 右パネル -->
+      <div class="ui-right-panel">
+        <div class="ui-panel-header">右パネル（森林クラウド検索）</div>
+        <div class="ui-tab-bar">
+          <div class="ui-tab active">保安林台帳</div>
+          <div class="ui-tab">整備事業</div>
+          <div class="ui-tab">森の力</div>
+          <div class="ui-tab">経営計画</div>
+          <div class="ui-tab">林地開発</div>
+        </div>
+        <div class="ui-panel-body" style="font-size:11px;">
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+            <span class="ui-combo">市町村 ▾</span>
+            <span class="ui-combo">大字 ▾</span>
+            <span class="ui-combo">地番</span>
+            <span class="ui-btn">検索</span>
+          </div>
+          <div style="color:var(--muted);">検索結果テーブル（行選択でハイライト表示）</div>
+        </div>
+      </div>
+    </div>
+    <div class="ui-bottom">
+      <span>レイヤー追加:</span>
+      <span class="ui-btn">林道</span>
+      <span style="margin-left:auto;"></span>
+      <span class="ui-btn">ローカル保存</span>
+      <span>取得日時: 2026-05-16 10:30</span>
+      <span class="ui-btn">更新</span>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>エリア</th><th>内容</th></tr>
+    <tr><td><strong>左パネル上部</strong></td><td>接続する GeoPackage レイヤーを選択するコンボボックス</td></tr>
+    <tr><td><strong>左パネル「選択中の小班」タブ</strong></td><td>地図上で選択したフィーチャーの森林簿属性を表示</td></tr>
+    <tr><td><strong>左パネル「クラウド情報」タブ</strong></td><td>右パネルの表で選択した行の詳細情報を表示</td></tr>
+    <tr><td><strong>右パネル</strong></td><td>保安林台帳・森の力・経営計画・林地開発の検索・表示</td></tr>
+    <tr><td><strong>下部バー</strong></td><td>レイヤー追加ボタン、キャッシュ操作</td></tr>
+  </table>
+
+  <!-- ── GPKG接続 ── -->
+  <span class="section-anchor" id="connect"></span>
+  <h2>GPKG レイヤー接続</h2>
+  <p>
+    プラグインはプロジェクトに読み込まれた <strong>.gpkg</strong> 形式のレイヤーを自動検出します。
+    左パネル上部のコンボボックスから使用するレイヤーを選択してください。
+  </p>
+
+  <div class="flow">
+    <div class="flow-step">① QGIS にプロジェクトを開く</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② GPKG レイヤーを追加</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③ コンボで選択</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">④ 市町村リストが自動更新</div>
+  </div>
+
+  <div class="note">
+    GPKG レイヤーをプロジェクトに後から追加した場合でも、コンボボックスには自動的に反映されます。
+  </div>
+
+  <hr>
+
+  <!-- ── 保安林台帳 ── -->
+  <span class="section-anchor" id="hoanrin"></span>
+  <h2>保安林台帳</h2>
+  <p>
+    静岡県森林クラウドの保安林台帳データを市町村・大字・地番で絞り込んで表示します。
+    接続した GeoPackage の地番データと照合し、一致状況を色分けで示します。
+  </p>
+
+  <h3>検索手順</h3>
+  <div class="flow">
+    <div class="flow-step">① 市町村を選択</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 大字・地番を指定（任意）</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「検索」ボタン</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">④ 結果テーブルが表示</div>
+  </div>
+
+  <div class="tip">
+    市町村を選択すると大字リストが自動で読み込まれます。地番は親番号のみ入力します（枝番は照合時に自動処理）。
+  </div>
+
+  <h3>行選択とハイライト</h3>
+  <p>
+    テーブルの行を選択（クリックまたは <kbd>↑</kbd><kbd>↓</kbd> キー）すると、
+    対応するフィーチャーが地図上にハイライト表示され、自動的にズームします。
+    ハイライトの色は地番の一致状況を示します（<a href="#highlight">凡例</a>参照）。
+  </p>
+
+  <h3>オプション機能</h3>
+  <table>
+    <tr><th>ボタン</th><th>説明</th></tr>
+    <tr><td><strong>近傍データ ON/OFF</strong></td><td>地番の一桁・二桁ズレの近傍フィーチャーを黄・赤・橙でハイライト表示します。デフォルトはOFFです。</td></tr>
+    <tr><td><strong>公図連携 ON/OFF</strong></td><td>kozu_xml_integrator プラグインと連携し、行選択時に自動で公図を呼び出します。kozu_xml_integrator がインストールされていない場合は無効です。</td></tr>
+  </table>
+
+  <hr>
+
+  <!-- ── 森の力 ── -->
+  <span class="section-anchor" id="mori"></span>
+  <h2>森の力再生事業</h2>
+  <p>
+    森の力再生事業の実施記録を農林事務所・年度・事業区分・整備者で検索します。
+  </p>
+
+  <h3>検索手順</h3>
+  <div class="flow">
+    <div class="flow-step">① 農林事務所を選択</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 年度・事業区分を選択（任意）</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「検索」ボタン</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">④ 整備者で絞り込み（任意）</div>
+  </div>
+
+  <div class="tip">
+    保安林台帳タブで市町村を選択した状態で「森の力」タブに切り替えると、
+    対応する農林事務所が自動的にセットされます。
+  </div>
+
+  <h3>実施箇所レイヤー</h3>
+  <p>
+    「実施箇所レイヤー」ボタンを ON にすると、MVT から取得した実施ポリゴンをレイヤーとして追加します。
+    取得済みのキャッシュがある場合はすぐに表示され、ない場合は静岡県全域のタイルを取得します（初回は時間がかかります）。
+  </p>
+  <div class="note">
+    レイヤーが OFF の状態で行を選択しても地図はズームしません。レイヤーを ON にしてから行を選択してください。
+  </div>
+
+  <hr>
+
+  <!-- ── 経営計画 ── -->
+  <span class="section-anchor" id="keikaku"></span>
+  <h2>経営計画</h2>
+  <p>
+    森林経営計画の認定状況と面積データを市町村別に表示します。
+  </p>
+
+  <h3>読み込み手順</h3>
+  <div class="flow">
+    <div class="flow-step">①「読み込み」ボタン</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 認定権者別に一覧表示</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「計画箇所レイヤー」で地図表示</div>
+  </div>
+
+  <p>
+    「計画箇所レイヤー」ボタンを ON にすると、市町村ごとに色分けしたポリゴンレイヤーが追加されます。
+    テーブルの行を選択すると、対応する市町村エリアにズームします。
+  </p>
+
+  <div class="tip">
+    一度読み込んだデータはプロジェクトフォルダ内に自動保存されます。次回起動時はキャッシュから高速に読み込まれます。
+  </div>
+
+  <hr>
+
+  <!-- ── 林地開発 ── -->
+  <span class="section-anchor" id="rinchi"></span>
+  <h2>林地開発</h2>
+  <p>
+    林地開発許可・連絡調整の情報を開発区分・申請者・開発目的・所在市町村で検索します。
+  </p>
+
+  <h3>検索手順</h3>
+  <div class="flow">
+    <div class="flow-step">① 開発区分・申請者・目的を入力</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 所在市町村を選択（任意）</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「検索」ボタン</div>
+  </div>
+
+  <div class="tip">
+    申請者・所在地は部分一致で検索されます。開発区分を「許可」「連絡調整」のどちらかに絞ると結果が整理されます。
+  </div>
+
+  <h3>林地開発レイヤー</h3>
+  <p>
+    「林地開発レイヤー」ボタンを ON にすると、許可・連絡調整それぞれの MVT レイヤーを地図に追加します。
+    行を選択すると申請者名を MVT から照合して対象フィーチャーにズームします。
+  </p>
+
+  <hr>
+
+  <!-- ── ハイライト凡例 ── -->
+  <span class="section-anchor" id="highlight"></span>
+  <h2>ハイライト色の凡例</h2>
+  <p>
+    保安林台帳の行選択時、GPKG の地番データとの照合結果に応じて次の色でハイライト表示します。
+  </p>
+
+  <table class="legend-table">
+    <tr>
+      <th>色</th>
+      <th>意味</th>
+      <th>条件</th>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-blue"></span>青</td>
+      <td><strong>完全一致</strong></td>
+      <td>地番親番・枝番ともに GPKG と一致</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-yellow"></span>黄</td>
+      <td><strong>近似一致</strong></td>
+      <td>地番親番は一致するが枝番が異なる（または GPKG に枝番なし）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-red"></span>赤</td>
+      <td><strong>近傍一致（一桁ズレ）</strong></td>
+      <td>親番の末尾1桁が異なるフィーチャー（近傍データ ON 時のみ表示）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-orange"></span>橙</td>
+      <td><strong>近傍一致（二桁ズレ）</strong></td>
+      <td>親番の末尾2桁が異なるフィーチャー（青・黄・赤が存在しない場合のみ表示）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-sel"></span>赤枠</td>
+      <td><strong>選択ハイライト</strong></td>
+      <td>森の力・経営計画・林地開発でレイヤー上の対象フィーチャーを示す</td>
+    </tr>
+  </table>
+
+  <div class="note">
+    赤・橙ハイライトは「近傍データ」ボタンが ON のときのみ表示されます。
+    デフォルトは OFF です。近傍一致は参考情報であり、実際の地番との同一性を保証するものではありません。
+  </div>
+
+  <h3>表示の優先ルール</h3>
+  <ul>
+    <li><strong>青が存在する場合</strong>：青のみ表示</li>
+    <li><strong>青がなく黄・赤が存在する場合</strong>：黄・赤を表示（橙は表示しない）</li>
+    <li><strong>黄・赤も存在しない場合</strong>：橙のみ表示（救済表示）</li>
+  </ul>
+
+  <hr>
+
+  <!-- ── キャッシュ ── -->
+  <span class="section-anchor" id="cache"></span>
+  <h2>キャッシュ機能</h2>
+  <p>
+    APIから取得したデータはプロジェクトフォルダ内の <code>fcloud_shizuoka/</code> ディレクトリに
+    SQLite データベースとして保存できます。次回以降はキャッシュから即座に読み込まれます。
+  </p>
+
+  <div class="warn">
+    キャッシュはプロジェクトフォルダに保存されます。<strong>QGIS プロジェクトが保存されていない場合は保存できません。</strong>
+  </div>
+
+  <table>
+    <tr><th>ボタン</th><th>動作</th></tr>
+    <tr><td><strong>ローカル保存</strong></td><td>現在表示中のデータをキャッシュに保存します</td></tr>
+    <tr><td><strong>更新</strong></td><td>API から再取得してキャッシュを上書きします</td></tr>
+    <tr><td>取得日時ラベル</td><td>現在のキャッシュの取得日時を表示します</td></tr>
+  </table>
+
+  <h3>タブ別のキャッシュ動作</h3>
+  <table>
+    <tr><th>タブ</th><th>キャッシュ形式</th><th>備考</th></tr>
+    <tr><td>保安林台帳</td><td>SQLite（全件）</td><td>全市町村分を一括保存。大字リストも自動キャッシュ</td></tr>
+    <tr><td>森の力</td><td>SQLite（検索条件別）＋ GPKG</td><td>テーブルデータと実施箇所ポリゴンを別々にキャッシュ</td></tr>
+    <tr><td>経営計画</td><td>SQLite（全件）＋ GPKG</td><td>読み込み時に自動保存。次回はキャッシュから高速読み込み</td></tr>
+    <tr><td>林地開発</td><td>SQLite（検索条件別）</td><td>市町村・開発区分・開発目的の組み合わせでキャッシュ</td></tr>
+  </table>
+
+  <hr>
+
+  <!-- ── レイヤー追加 ── -->
+  <span class="section-anchor" id="layers"></span>
+  <h2>レイヤー追加機能</h2>
+  <p>
+    ドック下部の「レイヤー追加」エリアから、補助的な MVT レイヤーをワンクリックで追加できます。
+  </p>
+
+  <table>
+    <tr><th>ボタン</th><th>追加されるレイヤー</th></tr>
+    <tr><td><strong>林道</strong></td><td>静岡県森林クラウドの林道 MVT レイヤー（<code>fcloud_林道</code>）</td></tr>
+  </table>
+
+  <p>
+    各タブのレイヤーボタン（実施箇所レイヤー・計画箇所レイヤー・林地開発レイヤー）から追加したレイヤーは、
+    タブを切り替えると自動的に非表示になり、タブに戻ると再表示されます。
+  </p>
+
+  <div class="tip">
+    追加されたレイヤーは、接続中の GPKG レイヤーの直上に配置されます。
+    プロジェクト未接続の場合はレイヤーツリーの最上部に追加されます。
+  </div>
+
+  <hr>
+  <p style="color:var(--muted); font-size:12px; text-align:center; margin-top:30px;">
+    Fcloud Shizuoka v0.1.0 &nbsp;／&nbsp; 静岡県専用プラグイン &nbsp;／&nbsp; Author: Hideharu Masai
+  </p>
+
+</main>
+</body>
+</html>
