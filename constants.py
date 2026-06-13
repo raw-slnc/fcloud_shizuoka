@@ -134,6 +134,10 @@ _CITY_TO_NORIN = {
     '浜松市':      '西部農林事務所',
 }
 
+# 経営計画MVT全県取得用
+_SHIZUOKA_BBOX     = (137.40, 34.50, 139.20, 35.80)  # (minLon, minLat, maxLon, maxLat) EPSG:4326
+_KEIKAKU_MVT_ZOOM  = 13
+
 _NORIN_OFFICES = [
     '賀茂農林事務所', '東部農林事務所', '富士農林事務所', '中部農林事務所',
     '志太榛原農林事務所', '中遠農林事務所',

@@ -148,10 +148,12 @@ class RinchiMixin:
         self.btn_rinchi_search.setEnabled(True)
         if data is None:
             self.lbl_rinchi_count.setText('取得失敗')
+            self._update_cache_btn_states()
             return
         self._current_raw_rinchi = data
         self.lbl_cache_ts.setText('取得日時: 未保存')
         self._display_rinchi_table(data, shinseisha, shozaichi)
+        self._update_cache_btn_states()
 
     def _display_rinchi_table(self, data, shinseisha='', shozaichi=''):
         records = self._extract_records(data)

@@ -179,6 +179,7 @@ class HoanrinMixin:
         self._current_raw_hoanrin = data
         self.lbl_cache_ts.setText('取得日時: 未保存')
         self._filter_and_display_hoanrin()
+        self._update_cache_btn_states()
 
     def _on_hoanrin_update_result(self, data):
         self.btn_hoanrin_search.setEnabled(True)
@@ -194,6 +195,7 @@ class HoanrinMixin:
         else:
             self.lbl_cache_ts.setText('取得日時: 未保存')
         self._filter_and_display_hoanrin()
+        self._update_cache_btn_states()
 
     def _filter_and_display_hoanrin(self):
         all_records = self._extract_records(self._current_raw_hoanrin)

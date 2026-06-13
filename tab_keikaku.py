@@ -5,18 +5,21 @@ import sip
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTableWidgetItem, QHeaderView,
+    QLabel, QPushButton, QTableWidgetItem, QHeaderView, QComboBox,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, QVariant
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
+
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry,
     QgsField, QgsVectorFileWriter, QgsFeatureRequest,
-    QgsCoordinateTransform, QgsCoordinateReferenceSystem,
-    QgsNetworkAccessManager,
+    QgsCoordinateTransform, QgsNetworkAccessManager,
 )
 
-from .constants import _API_BASE, _API_CITY_MAP
+from .constants import (
+    _API_BASE, _API_CITY_MAP,
+    _CD_CITY, _SHIZUOKA_BBOX, _KEIKAKU_MVT_ZOOM,
+)
 
 
 class KeikakuMixin:
@@ -33,7 +36,12 @@ class KeikakuMixin:
         row = QHBoxLayout()
         self.btn_keikaku_load = QPushButton('読み込み')
         row.addWidget(self.btn_keikaku_load)
-        row.addStretch(1)
+
+        self.combo_keikaku_filter = QComboBox()
+        self.combo_keikaku_filter.addItem('（全て）', None)
+        self.combo_keikaku_filter.setEnabled(False)
+        self.combo_keikaku_filter.setToolTip('認定権者で絞り込み')
+        row.addWidget(self.combo_keikaku_filter, 1)
 
         self.btn_keikaku_layer = QPushButton('計画箇所レイヤー')
         self.btn_keikaku_layer.setCheckable(True)
@@ -57,19 +65,52 @@ class KeikakuMixin:
         bottom.addWidget(self.lbl_keikaku_count, 1)
         v.addLayout(bottom)
 
+        self.btn_keikaku_load.setEnabled(False)
+        self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+
         self.btn_keikaku_load.clicked.connect(self._load_keikaku)
         self.btn_keikaku_layer.toggled.connect(self._on_keikaku_layer_toggled)
+        self.combo_keikaku_filter.currentIndexChanged.connect(self._on_keikaku_filter_changed)
         self.tbl_keikaku.itemSelectionChanged.connect(self._on_keikaku_selected)
         return w
 
+    def _update_keikaku_load_btn(self):
+        has_layer = (
+            self._connected_layer is not None
+            and not sip.isdeleted(self._connected_layer)
+            and self._connected_layer.isValid()
+        )
+        if not has_layer:
+            self.btn_keikaku_load.setEnabled(False)
+            self.tbl_keikaku.setRowCount(0)
+            self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
+            self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+            return
+
+        if self._gpkg_covers_connected_layer():
+            # 全県GPKGあり → 読み込みボタン無効、即ロード（古いレイヤーを先に除去）
+            self.btn_keikaku_load.setEnabled(False)
+            self._remove_keikaku_vector_layer()
+            gpkg = self._get_keikaku_gpkg_path()
+            self._load_keikaku_from_gpkg(gpkg)
+        else:
+            # 未取得 → 読み込みボタン有効
+            self.btn_keikaku_load.setEnabled(True)
+            self._remove_keikaku_vector_layer()
+            self.tbl_keikaku.setRowCount(0)
+            self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
+            self.lbl_keikaku_count.setText('読み込みボタンで全県経営計画データを取得します')
+
     # ------------------------------------------------------------------
-    # 読み込み・表示
+    # 読み込み
     # ------------------------------------------------------------------
 
     def _load_keikaku(self, force=False):
+        """読み込みボタン（初回のみ）または更新ボタン（force=True）から呼ばれる。"""
+        self.btn_keikaku_load.setEnabled(False)
+        self.btn_keikaku_layer.setEnabled(False)
         self.tbl_keikaku.setRowCount(0)
         self.lbl_keikaku_count.setText('読み込み中...')
-        self.btn_keikaku_load.setEnabled(False)
 
         cache_key = '経営計画/all'
         if not force:
@@ -77,7 +118,7 @@ class KeikakuMixin:
             if db is not None:
                 cached, ts = db.get(cache_key)
                 if cached is not None:
-                    self.btn_keikaku_load.setEnabled(True)
+                    self._current_raw_keikaku = cached
                     self.lbl_cache_ts.setText(f'取得日時: {ts}')
                     for rec in self._extract_records(cached):
                         if isinstance(rec, dict):
@@ -85,8 +126,9 @@ class KeikakuMixin:
                             name = rec.get('認定権者', '')
                             if cd is not None and name:
                                 self._keikaku_cd_to_name[int(cd)] = str(name)
-                    self._display_keikaku_table(cached)
-                    self._auto_build_keikaku_layer()
+                    self._remove_keikaku_vector_layer()
+                    self.lbl_keikaku_count.setText('MVT取得中...')
+                    self._start_keikaku_mvt_fetch()
                     return
 
         self._post_api(
@@ -96,32 +138,80 @@ class KeikakuMixin:
         )
 
     def _on_keikaku_result(self, data, cache_key):
-        self.btn_keikaku_load.setEnabled(True)
         if data is None:
             self.lbl_keikaku_count.setText('取得失敗')
+            self.btn_keikaku_load.setEnabled(True)
+            self.btn_keikaku_layer.setEnabled(True)
             return
         self._current_raw_keikaku = data
         db = self._get_db('経営計画')
         if db is not None:
             ts = db.put(cache_key, data)
             self.lbl_cache_ts.setText(f'取得日時: {ts}')
-        records = self._extract_records(data)
-        for rec in records:
+        for rec in self._extract_records(data):
             if isinstance(rec, dict):
                 cd = rec.get('市町村cd')
                 name = rec.get('認定権者', '')
                 if cd is not None and name:
                     self._keikaku_cd_to_name[int(cd)] = str(name)
-        self._display_keikaku_table(data)
-        self._auto_build_keikaku_layer()
+        self._remove_keikaku_vector_layer()
+        self.lbl_keikaku_count.setText('MVT取得中...')
+        self._start_keikaku_mvt_fetch()
+
+    def _gpkg_covers_connected_layer(self):
+        """keiei_keikaku.gpkg にフィーチャーが1件でもあれば True（全県データのため範囲チェック不要）。"""
+        gpkg = self._get_keikaku_gpkg_path()
+        if not gpkg or not os.path.exists(gpkg):
+            return False
+        gpkg_layer = QgsVectorLayer(f'{gpkg}|layername=経営計画作成箇所', '', 'ogr')
+        if not gpkg_layer.isValid():
+            return False
+        req = QgsFeatureRequest().setLimit(1)
+        return any(True for _ in gpkg_layer.getFeatures(req))
 
     def _display_keikaku_table(self, data):
         self._current_raw_keikaku = data
-        records = self._extract_records(data)
+        all_records = [r for r in self._extract_records(data) if isinstance(r, dict)]
+
+        # 認定権者コンボ更新（選択を保持）
+        current_val = self.combo_keikaku_filter.currentData()
+        self.combo_keikaku_filter.blockSignals(True)
+        self.combo_keikaku_filter.clear()
+        self.combo_keikaku_filter.addItem('（全て）', None)
+        for name in sorted({r.get('認定権者', '') for r in all_records if r.get('認定権者')}):
+            self.combo_keikaku_filter.addItem(name, name)
+        idx = self.combo_keikaku_filter.findData(current_val)
+        self.combo_keikaku_filter.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_keikaku_filter.setEnabled(self.combo_keikaku_filter.count() > 1)
+        self.combo_keikaku_filter.blockSignals(False)
+
+        self._render_keikaku_table(all_records)
+
+    def _on_keikaku_filter_changed(self):
+        if self._current_raw_keikaku is None:
+            return
+        all_records = [r for r in self._extract_records(self._current_raw_keikaku)
+                       if isinstance(r, dict)]
+        self._render_keikaku_table(all_records)
+        self._apply_keikaku_layer_filter()
+
+    def _apply_keikaku_layer_filter(self):
+        """コンボ選択に従いレイヤーの表示範囲を setSubsetString で絞り込む。"""
+        if not self._keikaku_vector_layer_id:
+            return
+        vl = QgsProject.instance().mapLayer(self._keikaku_vector_layer_id)
+        if not vl or sip.isdeleted(vl):
+            return
+        selected = self.combo_keikaku_filter.currentData()
+        vl.setSubsetString(f'"市町村名" = \'{selected}\'' if selected else '')
+        self._refresh_map_canvas()
+
+    def _render_keikaku_table(self, all_records):
+        selected = self.combo_keikaku_filter.currentData()
+        records = ([r for r in all_records if r.get('認定権者') == selected]
+                   if selected else all_records)
         self.tbl_keikaku.setRowCount(len(records))
         for row_i, rec in enumerate(records):
-            if not isinstance(rec, dict):
-                continue
             vals = [
                 str(rec.get('認定権者', '') or ''),
                 str(rec.get('表示用_面積',     rec.get('面積',     '')) or ''),
@@ -136,6 +226,7 @@ class KeikakuMixin:
                 item = QTableWidgetItem(' ' + v)
                 item.setData(Qt.UserRole, rec)
                 self.tbl_keikaku.setItem(row_i, col, item)
+        self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
         self.lbl_keikaku_count.setText(f'{len(records)}件')
 
     # ------------------------------------------------------------------
@@ -146,52 +237,81 @@ class KeikakuMixin:
         home = QgsProject.instance().homePath()
         if not home:
             return None
-        return os.path.join(home, 'fcloud_shizuoka', 'keikaku_chikara.gpkg')
+        return os.path.join(home, 'fcloud_shizuoka', 'keiei_keikaku.gpkg')
 
     def _on_keikaku_layer_toggled(self, on):
-        if not on:
-            self._remove_keikaku_vector_layer()
-            return
-        if self._current_raw_keikaku is None:
+        """表示ON/OFFのみ。ローディング・照合は行わない。"""
+        if not self._keikaku_vector_layer_id:
             self.btn_keikaku_layer.blockSignals(True)
             self.btn_keikaku_layer.setChecked(False)
             self.btn_keikaku_layer.blockSignals(False)
             return
-        if self._keikaku_vector_layer_id:
-            self._set_layer_visible(self._keikaku_vector_layer_id, True)
-            self._refresh_map_canvas()
+        vl = QgsProject.instance().mapLayer(self._keikaku_vector_layer_id)
+        if not vl or sip.isdeleted(vl):
+            self._keikaku_vector_layer_id = None
+            self.btn_keikaku_layer.blockSignals(True)
+            self.btn_keikaku_layer.setChecked(False)
+            self.btn_keikaku_layer.blockSignals(False)
             return
-        gpkg = self._get_keikaku_gpkg_path()
-        if gpkg and os.path.exists(gpkg):
-            self._load_keikaku_from_gpkg(gpkg)
-        elif self._keikaku_cd_to_name:
-            self._start_keikaku_mvt_fetch()
-        else:
-            self._load_keikaku()
+        self._set_layer_visible(self._keikaku_vector_layer_id, on)
         self._refresh_map_canvas()
 
     def _load_keikaku_from_gpkg(self, gpkg_path):
         layer = QgsVectorLayer(f'{gpkg_path}|layername=経営計画作成箇所',
                                'fcloud_経営計画作成箇所', 'ogr')
         if not layer.isValid():
-            self._start_keikaku_mvt_fetch()
+            self.lbl_keikaku_count.setText('GPKGの読み込みに失敗しました')
             return
         self._apply_keikaku_style(layer)
+
+        # 経営計画は県管轄のため全域表示（エクステントフィルタなし）
         visible = (self.btn_keikaku_layer.isChecked()
                    and self.cloud_tab.currentIndex() == 3)
         self._add_layer_above_gpkg(layer, visible=visible)
         self._keikaku_vector_layer_id = layer.id()
+        self.btn_keikaku_layer.setEnabled(True)
+
+        # APIキャッシュが未ロードの場合はキャッシュから復元
+        if self._current_raw_keikaku is None:
+            db = self._get_db('経営計画')
+            if db is not None:
+                cached, ts = db.get('経営計画/all')
+                if cached is not None:
+                    self._current_raw_keikaku = cached
+                    self.lbl_cache_ts.setText(f'取得日時: {ts}')
+                    for rec in self._extract_records(cached):
+                        if isinstance(rec, dict):
+                            cd = rec.get('市町村cd')
+                            name = rec.get('認定権者', '')
+                            if cd is not None and name:
+                                self._keikaku_cd_to_name[int(cd)] = str(name)
+
+        if self._current_raw_keikaku is not None:
+            self._display_keikaku_table(self._current_raw_keikaku)
+        self._apply_keikaku_layer_filter()
 
     def _start_keikaku_mvt_fetch(self):
-        from .mvt_loader import shizuoka_tiles
+        from .mvt_loader import _lon_to_tile_x, _lat_to_tile_y
         self._keikaku_layer_features = []
-        tiles = shizuoka_tiles(zoom=9)
+        zoom = _KEIKAKU_MVT_ZOOM
+        min_lon, min_lat, max_lon, max_lat = _SHIZUOKA_BBOX
+
+        x0 = _lon_to_tile_x(min_lon, zoom)
+        x1 = _lon_to_tile_x(max_lon, zoom)
+        y0 = _lat_to_tile_y(max_lat, zoom)
+        y1 = _lat_to_tile_y(min_lat, zoom)
+        tiles = [(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
+
         self._keikaku_tiles_pending = len(tiles)
         self._keikaku_tiles_received = 0
-        self.lbl_keikaku_count.setText(f'タイル取得中... (0/{self._keikaku_tiles_pending})')
+        self.lbl_keikaku_count.setText(
+            f'タイル取得中... (0/{self._keikaku_tiles_pending})')
         self.btn_keikaku_layer.setEnabled(False)
-        mvt_url = ('https://fcloud.pref.shizuoka.jp/MAP/MVT/'
-                   'SHINRIN_KEIEI_KEIKAKU_SAKUSEI_KASHO/9/{x}/{y}.pbf')
+
+        mvt_url = (
+            'https://fcloud.pref.shizuoka.jp/MAP/MVT/'
+            f'SHINRIN_KEIEI_KEIKAKU_SAKUSEI_KASHO/{zoom}/{{x}}/{{y}}.pbf'
+        )
         for tx, ty in tiles:
             url = mvt_url.replace('{x}', str(tx)).replace('{y}', str(ty))
             req = QNetworkRequest(QUrl(url))
@@ -205,7 +325,7 @@ class KeikakuMixin:
         if reply.error() == QNetworkReply.NoError:
             raw = bytes(reply.readAll())
             try:
-                feats = parse_tile(raw, tile_x, tile_y, 9)
+                feats = parse_tile(raw, tile_x, tile_y, _KEIKAKU_MVT_ZOOM)
                 self._keikaku_layer_features.extend(feats)
             except Exception as e:
                 print(f'[fcloud] keikaku MVT parse error ({tile_x},{tile_y}): {e}')
@@ -216,73 +336,111 @@ class KeikakuMixin:
         self.lbl_keikaku_count.setText(
             f'タイル取得中... ({self._keikaku_tiles_received}/{self._keikaku_tiles_pending})')
         if self._keikaku_tiles_received >= self._keikaku_tiles_pending:
-            self._build_keikaku_vector_layer()
+            self._build_keikaku_from_mvt()
 
-    def _build_keikaku_vector_layer(self):
+    def _build_keikaku_from_mvt(self):
+        """MVTフィーチャーから直接レイヤーを構築してGPKGに保存する（空間照合なし）。"""
+        if not self._keikaku_layer_features:
+            self.lbl_keikaku_count.setText('取得データなし')
+            self.btn_keikaku_layer.setEnabled(False)
+            return
+
+        self.lbl_keikaku_count.setText('GPKGに保存中...')
         layer = QgsVectorLayer('Polygon?crs=EPSG:4326', 'fcloud_経営計画作成箇所', 'memory')
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField('市町村cd',  QVariant.Int),
-            QgsField('市町村名',  QVariant.String),
-            QgsField('THE_FID',   QVariant.LongLong),
+            QgsField('市町村cd', QVariant.Int),
+            QgsField('市町村名', QVariant.String),
         ])
         layer.updateFields()
 
         feats_to_add = []
         for f in self._keikaku_layer_features:
-            geom = QgsGeometry.fromWkt(f['geometry'])
-            if geom is None or geom.isEmpty():
-                continue
             cd = int(f.get('OFFICE', 0))
-            name = self._keikaku_cd_to_name.get(cd, '')
+            if cd == 0:
+                continue
+            geom = QgsGeometry.fromWkt(f['geometry'])
+            if not geom or geom.isEmpty():
+                continue
+            name = self._keikaku_cd_to_name.get(cd) or _CD_CITY.get(cd, str(cd))
             qf = QgsFeature()
             qf.setGeometry(geom)
-            qf.setAttributes([cd, name, int(f.get('THE_FID', 0))])
+            qf.setAttributes([cd, name])
             feats_to_add.append(qf)
+
+        if not feats_to_add:
+            self.lbl_keikaku_count.setText('取得データなし')
+            self.btn_keikaku_layer.setEnabled(False)
+            return
 
         pr.addFeatures(feats_to_add)
         layer.updateExtents()
-        self._apply_keikaku_style(layer)
+
+        # タイル境界クリッピングで分割されたポリゴンを市町村cd単位でdissolve
+        self.lbl_keikaku_count.setText('ポリゴン統合中...')
+        try:
+            import processing
+            result = processing.run('native:dissolve', {
+                'INPUT': layer,
+                'FIELD': ['市町村cd'],
+                'OUTPUT': 'memory:',
+            })
+            save_layer = result['OUTPUT']
+        except Exception as e:
+            print(f'[fcloud] dissolve failed, using raw layer: {e}')
+            save_layer = layer
+
+        self._save_keikaku_gpkg(save_layer)
 
         gpkg = self._get_keikaku_gpkg_path()
-        if gpkg:
-            os.makedirs(os.path.dirname(gpkg), exist_ok=True)
-            opts = QgsVectorFileWriter.SaveVectorOptions()
-            opts.driverName = 'GPKG'
-            opts.fileEncoding = 'UTF-8'
-            opts.layerName = '経営計画作成箇所'
-            err, msg = QgsVectorFileWriter.writeAsVectorFormatV2(
-                layer, gpkg, QgsProject.instance().transformContext(), opts)[:2]
-            if err:
-                print(f'[fcloud] keikaku GPKG save error: {msg}')
+        if gpkg and os.path.exists(gpkg):
+            self._load_keikaku_from_gpkg(gpkg)
 
-        visible = (self.btn_keikaku_layer.isChecked()
-                   and self.cloud_tab.currentIndex() == 3)
-        self._add_layer_above_gpkg(layer, visible=visible)
-        self._keikaku_vector_layer_id = layer.id()
+        self.btn_keikaku_load.setEnabled(False)
         self.btn_keikaku_layer.setEnabled(True)
-        total = self.tbl_keikaku.rowCount()
-        self.lbl_keikaku_count.setText(f'{total}件' if total else '')
+        self._update_cache_btn_states()
+
+    def _save_keikaku_gpkg(self, new_layer):
+        """全県データで全上書き保存。"""
+        gpkg = self._get_keikaku_gpkg_path()
+        if not gpkg:
+            return
+        os.makedirs(os.path.dirname(gpkg), exist_ok=True)
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = 'GPKG'
+        opts.fileEncoding = 'UTF-8'
+        opts.layerName = '経営計画作成箇所'
+        err, msg = QgsVectorFileWriter.writeAsVectorFormatV2(
+            new_layer, gpkg, QgsProject.instance().transformContext(), opts)[:2]
+        if err:
+            print(f'[fcloud] keiei_keikaku GPKG save error: {msg}')
 
     def _apply_keikaku_style(self, layer):
         from qgis.core import QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsFillSymbol
-        idx = layer.fields().indexOf('市町村cd')
-        unique_cds = sorted(int(v) for v in layer.uniqueValues(idx)
-                            if v is not None)
+        cd_idx   = layer.fields().indexOf('市町村cd')
+        name_idx = layer.fields().indexOf('市町村名')
+
+        # レイヤーのデータから cd → 市町村名 を直接収集
+        cd_to_name = {}
+        req = QgsFeatureRequest().setSubsetOfAttributes([cd_idx, name_idx])
+        for feat in layer.getFeatures(req):
+            cd = feat.attribute(cd_idx)
+            if cd is not None and int(cd) not in cd_to_name:
+                name = feat.attribute(name_idx)
+                cd_to_name[int(cd)] = str(name) if name else str(int(cd))
+
         cats = []
         phi = 0.618033988749895
         hue = 0.05
-        for cd in unique_cds:
+        for cd in sorted(cd_to_name):
             hue = (hue + phi) % 1.0
             r, g, b = colorsys.hsv_to_rgb(hue, 0.55, 0.90)
             ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
-            label = self._keikaku_cd_to_name.get(cd, str(cd))
             sym = QgsFillSymbol.createSimple({
-                'color':         f'{ri},{gi},{bi},150',
-                'outline_color': f'{max(0,ri-50)},{max(0,gi-50)},{max(0,bi-50)},200',
-                'outline_width': '0.3',
+                'color':         f'{ri},{gi},{bi},70',
+                'outline_style': 'no',
             })
-            cats.append(QgsRendererCategory(cd, sym, label))
+            cats.append(QgsRendererCategory(cd, sym, cd_to_name[cd]))
         layer.setRenderer(QgsCategorizedSymbolRenderer('市町村cd', cats))
 
     def _remove_keikaku_vector_layer(self):
@@ -294,18 +452,6 @@ class KeikakuMixin:
             self._keikaku_vector_layer_id = None
         self._keikaku_layer_features = []
         self._refresh_map_canvas()
-
-    def _auto_build_keikaku_layer(self):
-        if self._keikaku_vector_layer_id:
-            vl = QgsProject.instance().mapLayer(self._keikaku_vector_layer_id)
-            if vl and not sip.isdeleted(vl):
-                return
-            self._keikaku_vector_layer_id = None
-        gpkg = self._get_keikaku_gpkg_path()
-        if gpkg and os.path.exists(gpkg):
-            self._load_keikaku_from_gpkg(gpkg)
-        elif self._keikaku_cd_to_name:
-            self._start_keikaku_mvt_fetch()
 
     # ------------------------------------------------------------------
     # 行選択 → ズーム
@@ -385,5 +531,3 @@ class KeikakuMixin:
         if not layer or sip.isdeleted(layer) or not gpkg_city:
             return
         _bbox_from_layer(layer, f'"市町村名称" = \'{gpkg_city}\'')
-
-

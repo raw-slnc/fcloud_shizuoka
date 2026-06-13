@@ -136,10 +136,12 @@ class MoriMixin:
         self.btn_mori_search.setEnabled(True)
         if data is None:
             self.lbl_mori_count.setText('取得失敗')
+            self._update_cache_btn_states()
             return
         self._current_raw_mori = data
         self.lbl_cache_ts.setText('取得日時: 未保存')
         self._display_mori_table(data)
+        self._update_cache_btn_states()
 
     def _display_mori_table(self, data):
         records = self._extract_records(data)

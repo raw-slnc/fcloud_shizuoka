@@ -5,8 +5,8 @@ description=Shizuoka Prefecture Forest Cloud information viewer. Links forest pl
 version=0.1.0
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
-about=Displays forest information from the Shizuoka Prefecture Forest Cloud public system, linked to GeoPackage data created by Shinrinbo Code Converter. Provides a dock panel for browsing forest stand attributes, protective forest records, and forest management data. This plugin is specific to Shizuoka Prefecture. / Support: https://paypal.me/rawslnc
-about[ja]=静岡県森林クラウドの公開システムと連携し、Shinrinbo Code Converter で作成した GeoPackage データに基づいて林地情報を表示します。林小班属性・保安林記録・経営計画作成箇所をドックパネルで閲覧できます。本プラグインは静岡県専用です。 / Support: https://paypal.me/rawslnc
+about=Displays forest information from the Shizuoka Prefecture Forest Cloud public system, linked to GeoPackage data created by Shinrinbo Code Converter. Provides a dock panel for browsing forest stand attributes, protective forest records, and forest management data. This plugin is specific to Shizuoka Prefecture. Requires a .gpkg or .shp layer containing a KEY1 field loaded in the QGIS project. The displayed information (protective forest ledger, Mori no Chikara reforestation project, forest management plans, forest land development, etc.) is sourced from open data published by Shizuoka Prefecture and the Shizuoka Prefecture Forest Cloud, retrieved, processed, and formatted for easy reference in QGIS. / Support: https://paypal.me/rawslnc
+about[ja]=静岡県森林クラウドの公開システムと連携し、Shinrinbo Code Converter で作成した GeoPackage データに基づいて林地情報を表示します。林小班属性・保安林記録・経営計画作成箇所をドックパネルで閲覧できます。本プラグインは静岡県専用です。KEY1 フィールドを持つ .gpkg または .shp レイヤーが QGIS プロジェクトに読み込まれている必要があります。表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、QGIS 上で参照しやすいよう取得・加工・編集して表示しています。 / Support: https://paypal.me/rawslnc
 changelog=
     0.1.0 - Initial release
 category=Vector

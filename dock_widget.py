@@ -7,7 +7,7 @@ import urllib.parse
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QTabWidget, QTextBrowser,
-    QPushButton, QFrame,
+    QPushButton, QFrame, QMessageBox,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings
 from qgis.PyQt.QtGui import QColor, QDesktopServices
@@ -172,6 +172,13 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         bottom_row.addWidget(self.btn_rindo)
         bottom_row.addStretch()
 
+        btn_data_info = QPushButton('データについて')
+        btn_data_info.setToolTip('データについて')
+        btn_data_info.setStyleSheet(_btn_style)
+        btn_data_info.clicked.connect(self._show_data_info)
+        bottom_row.addWidget(btn_data_info)
+        bottom_row.addSpacing(8)
+
         self.btn_cache_save = QPushButton('ローカル保存')
         self.btn_cache_save.setToolTip('現在のデータをローカルDBに保存')
         self.btn_cache_save.setStyleSheet(_btn_style)
@@ -200,6 +207,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         self._refresh_layer_combo()
         self._on_tab_changed(0)
         self._restore_state()
+
+    def _show_data_info(self):
+        QMessageBox.information(
+            self,
+            'データについて',
+            '表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、'
+            '静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、'
+            'QGIS 上で参照しやすいよう取得・加工・編集して表示しています。',
+        )
 
     def _open_manual(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'manual.html')
@@ -387,12 +403,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
 
         if index == 0:
             db = self._get_db('保安林台帳')
-            if db is not None:
-                ts = db.get_fetched_at('保安林/all')
-                if ts:
-                    self.lbl_cache_ts.setText(f'取得日時: {ts}')
-                    return
-            self.lbl_cache_ts.setText('取得日時: —')
+            ts = db.get_fetched_at('保安林/all') if db else None
+            self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
         elif index == 2:
             city = self.combo_hoanrin_city.currentText().strip()
             norin = _CITY_TO_NORIN.get(city, '')
@@ -408,28 +420,22 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
                 self.lbl_cache_ts.setText('レイヤーキャッシュ: なし')
         elif index == 3:
             db = self._get_db('経営計画')
-            if db is not None:
-                ts = db.get_fetched_at('経営計画/all')
-                if ts:
-                    self.lbl_cache_ts.setText(f'取得日時: {ts}')
-                    return
-            self.lbl_cache_ts.setText('取得日時: —')
+            ts = db.get_fetched_at('経営計画/all') if db else None
+            self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
         elif index == 4:
             city = self.combo_hoanrin_city.currentText().strip()
             if city:
                 i = self.combo_rinchi_city.findData(city)
                 if i >= 0:
                     self.combo_rinchi_city.setCurrentIndex(i)
+            ts = None
             if self._current_rinchi_cache_key:
                 db = self._get_db('林地開発')
-                if db is not None:
-                    ts = db.get_fetched_at(self._current_rinchi_cache_key)
-                    if ts:
-                        self.lbl_cache_ts.setText(f'取得日時: {ts}')
-                        return
-            self.lbl_cache_ts.setText('取得日時: —')
+                ts = db.get_fetched_at(self._current_rinchi_cache_key) if db else None
+            self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
         else:
             self.lbl_cache_ts.setText('取得日時: —')
+        self._update_cache_btn_states()
 
     # ------------------------------------------------------------------
     # キャッシュ操作
@@ -461,6 +467,26 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
                 return
             ts = db.put(self._current_rinchi_cache_key, self._current_raw_rinchi)
             self.lbl_cache_ts.setText(f'取得日時: {ts}')
+        self._update_cache_btn_states()
+
+    def _update_cache_btn_states(self):
+        ts = self.lbl_cache_ts.text()
+        no_data = '—' in ts or ts.strip() == ''
+        unsaved = '未保存' in ts
+        tab = self.cloud_tab.currentIndex()
+
+        if tab == 3:
+            # 経営計画: APIから取得すると同時にGPKGへ自動保存 → ローカル保存は常に無効
+            self.btn_cache_save.setEnabled(False)
+            self.btn_cache_update.setEnabled(not no_data)
+        elif tab == 1:
+            # 整備事業: 未実装
+            self.btn_cache_save.setEnabled(False)
+            self.btn_cache_update.setEnabled(False)
+        else:
+            # 保安林・森の力・林地開発: 未保存なら保存可、保存済みなら更新可
+            self.btn_cache_save.setEnabled(unsaved)
+            self.btn_cache_update.setEnabled(not unsaved and not no_data)
 
     def _update_current_cache(self):
         tab = self.cloud_tab.currentIndex()
@@ -484,12 +510,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self.btn_mori_layer.setChecked(True)
             self._on_mori_layer_toggled(True)
         elif tab == 3:
-            gpkg = self._get_keikaku_gpkg_path()
-            if gpkg and os.path.exists(gpkg):
-                try:
-                    os.remove(gpkg)
-                except OSError:
-                    pass
+            # GPKGは他地域のデータを保持するため削除せず、地域単位で上書きする
             self._remove_keikaku_vector_layer()
             self._keikaku_cd_to_name.clear()
             self.lbl_cache_ts.setText('取得日時: 更新中...')
@@ -514,6 +535,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         for layer in QgsProject.instance().mapLayers().values():
             if not isinstance(layer, QgsVectorLayer):
                 continue
+            if layer.name().startswith('fcloud_'):
+                continue
             src = layer.source().lower()
             if '.gpkg' not in src and '.shp' not in src:
                 continue
@@ -525,7 +548,10 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             if idx >= 0:
                 self.layer_combo.setCurrentIndex(idx)
         self.layer_combo.blockSignals(False)
-        self._on_layer_changed()
+        new_id = self.layer_combo.currentData()
+        if new_id != getattr(self, '_last_combo_id', None):
+            self._last_combo_id = new_id
+            self._on_layer_changed()
 
     def _on_layer_changed(self):
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
@@ -542,15 +568,16 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self.combo_rinchi_city.clear()
             self.combo_rinchi_city.addItem('（全て）', '')
             self.combo_rinchi_city.blockSignals(False)
-            return
-        QSettings().setValue('fcloud_shizuoka/layer_id', layer_id)
-        layer = QgsProject.instance().mapLayer(layer_id)
-        if layer:
-            self._connected_layer = layer
-            layer.selectionChanged.connect(self._on_selection_changed)
-            flds = [f.name() for f in layer.fields()]
-            self._layer_type = 'shp' if '市町村名称' not in flds and '市町村CD' in flds else 'gpkg'
-            self._refresh_city_combo(layer)
+        else:
+            QSettings().setValue('fcloud_shizuoka/layer_id', layer_id)
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if layer:
+                self._connected_layer = layer
+                layer.selectionChanged.connect(self._on_selection_changed)
+                flds = [f.name() for f in layer.fields()]
+                self._layer_type = 'shp' if '市町村名称' not in flds and '市町村CD' in flds else 'gpkg'
+                self._refresh_city_combo(layer)
+        self._update_keikaku_load_btn()
 
     def _refresh_city_combo(self, layer):
         from .constants import _CITY_API_MAP, _API_CITY_MAP, _CD_CITY
