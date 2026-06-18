@@ -24,6 +24,52 @@ from .constants import (
 
 class KeikakuMixin:
 
+    def _keikaku_layer_requested_on(self):
+        return self._keikaku_layer_requested is not False
+
+    def _has_connected_keikaku_source(self):
+        return (
+            self._connected_layer is not None
+            and not sip.isdeleted(self._connected_layer)
+            and self._connected_layer.isValid()
+        )
+
+    def _ensure_keikaku_layer_loaded(self):
+        if self._keikaku_vector_layer_id or not self.isVisible():
+            return False
+        if not self._has_connected_keikaku_source():
+            return False
+
+        gpkg = self._get_keikaku_gpkg_path()
+        if gpkg and os.path.exists(gpkg):
+            self._load_keikaku_from_gpkg(gpkg)
+            return bool(self._keikaku_vector_layer_id)
+
+        if self._keikaku_layer_requested_on() and not self._keikaku_loading:
+            self._load_keikaku()
+        return False
+
+    def _should_show_keikaku_layer(self):
+        return (
+            self._keikaku_layer_requested_on()
+            and self.cloud_tab.currentIndex() == 3
+            and self.isVisible()
+        )
+
+    def _sync_keikaku_layer_visibility(self, ensure_loaded=False):
+        if ensure_loaded:
+            self._ensure_keikaku_layer_loaded()
+
+        if not self._keikaku_vector_layer_id:
+            return False
+
+        if not self._should_show_keikaku_layer():
+            self._clear_selection_highlights()
+        return self._set_layer_visible(
+            self._keikaku_vector_layer_id,
+            self._should_show_keikaku_layer(),
+        )
+
     # ------------------------------------------------------------------
     # タブ構築
     # ------------------------------------------------------------------
@@ -66,6 +112,7 @@ class KeikakuMixin:
         v.addLayout(bottom)
 
         self.btn_keikaku_load.setEnabled(False)
+        self.btn_keikaku_layer.setEnabled(False)
         self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
 
         self.btn_keikaku_load.clicked.connect(self._load_keikaku)
@@ -75,31 +122,41 @@ class KeikakuMixin:
         return w
 
     def _update_keikaku_load_btn(self):
-        has_layer = (
-            self._connected_layer is not None
-            and not sip.isdeleted(self._connected_layer)
-            and self._connected_layer.isValid()
-        )
-        if not has_layer:
+        if not self._has_connected_keikaku_source():
             self.btn_keikaku_load.setEnabled(False)
+            self.btn_keikaku_layer.setEnabled(False)
+            self.btn_keikaku_layer.blockSignals(True)
+            self.btn_keikaku_layer.setChecked(False)
+            self.btn_keikaku_layer.blockSignals(False)
             self.tbl_keikaku.setRowCount(0)
             self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
             self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
             return
 
+        if self._keikaku_layer_requested is None:
+            self._keikaku_layer_requested = True
+        self.btn_keikaku_layer.blockSignals(True)
+        self.btn_keikaku_layer.setChecked(self._keikaku_layer_requested_on())
+        self.btn_keikaku_layer.blockSignals(False)
+
         if self._gpkg_covers_connected_layer():
-            # 全県GPKGあり → 読み込みボタン無効、即ロード（古いレイヤーを先に除去）
+            # 全県GPKGあり → タブ選択時に読み込む
             self.btn_keikaku_load.setEnabled(False)
-            self._remove_keikaku_vector_layer()
-            gpkg = self._get_keikaku_gpkg_path()
-            self._load_keikaku_from_gpkg(gpkg)
+            self.btn_keikaku_layer.setEnabled(True)
+            if self.cloud_tab.currentIndex() == 3 and self.isVisible():
+                self._sync_keikaku_layer_visibility(ensure_loaded=True)
+            else:
+                self._remove_keikaku_vector_layer()
+                self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
+                self.lbl_keikaku_count.setText('経営計画タブを開くとレイヤーを表示します')
         else:
-            # 未取得 → 読み込みボタン有効
+            # 未取得 → タブ選択時に取得、手動読み込みも可
             self.btn_keikaku_load.setEnabled(True)
+            self.btn_keikaku_layer.setEnabled(self.cloud_tab.currentIndex() == 3)
             self._remove_keikaku_vector_layer()
             self.tbl_keikaku.setRowCount(0)
             self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
-            self.lbl_keikaku_count.setText('読み込みボタンで全県経営計画データを取得します')
+            self.lbl_keikaku_count.setText('経営計画タブでデータ取得後にレイヤーを表示します')
 
     # ------------------------------------------------------------------
     # 読み込み
@@ -107,6 +164,7 @@ class KeikakuMixin:
 
     def _load_keikaku(self, force=False):
         """読み込みボタン（初回のみ）または更新ボタン（force=True）から呼ばれる。"""
+        self._keikaku_loading = True
         self.btn_keikaku_load.setEnabled(False)
         self.btn_keikaku_layer.setEnabled(False)
         self.tbl_keikaku.setRowCount(0)
@@ -139,6 +197,7 @@ class KeikakuMixin:
 
     def _on_keikaku_result(self, data, cache_key):
         if data is None:
+            self._keikaku_loading = False
             self.lbl_keikaku_count.setText('取得失敗')
             self.btn_keikaku_load.setEnabled(True)
             self.btn_keikaku_layer.setEnabled(True)
@@ -240,36 +299,32 @@ class KeikakuMixin:
         return os.path.join(home, 'fcloud_shizuoka', 'keiei_keikaku.gpkg')
 
     def _on_keikaku_layer_toggled(self, on):
-        """表示ON/OFFのみ。ローディング・照合は行わない。"""
-        if not self._keikaku_vector_layer_id:
-            self.btn_keikaku_layer.blockSignals(True)
-            self.btn_keikaku_layer.setChecked(False)
-            self.btn_keikaku_layer.blockSignals(False)
-            return
-        vl = QgsProject.instance().mapLayer(self._keikaku_vector_layer_id)
-        if not vl or sip.isdeleted(vl):
-            self._keikaku_vector_layer_id = None
-            self.btn_keikaku_layer.blockSignals(True)
-            self.btn_keikaku_layer.setChecked(False)
-            self.btn_keikaku_layer.blockSignals(False)
-            return
-        self._set_layer_visible(self._keikaku_vector_layer_id, on)
-        self._refresh_map_canvas()
+        """表示ON/OFFのみ。_keikaku_vector_layer_id はリセットしない。"""
+        self._keikaku_layer_requested = bool(on)
+        changed = self._sync_keikaku_layer_visibility(ensure_loaded=on)
+        if changed:
+            self._refresh_map_canvas()
 
     def _load_keikaku_from_gpkg(self, gpkg_path):
         layer = QgsVectorLayer(f'{gpkg_path}|layername=経営計画作成箇所',
                                'fcloud_経営計画作成箇所', 'ogr')
         if not layer.isValid():
+            self._keikaku_loading = False
             self.lbl_keikaku_count.setText('GPKGの読み込みに失敗しました')
             return
         self._apply_keikaku_style(layer)
 
         # 経営計画は県管轄のため全域表示（エクステントフィルタなし）
-        visible = (self.btn_keikaku_layer.isChecked()
-                   and self.cloud_tab.currentIndex() == 3)
-        self._add_layer_above_gpkg(layer, visible=visible)
+        # レイヤー生成時も、ユーザーが最後に選んだ表示希望状態を優先する。
+        if self._keikaku_layer_requested is None:
+            self._keikaku_layer_requested = True
+        self._add_layer_above_gpkg(layer, visible=self._should_show_keikaku_layer())
         self._keikaku_vector_layer_id = layer.id()
+        self.btn_keikaku_layer.blockSignals(True)
+        self.btn_keikaku_layer.setChecked(self._keikaku_layer_requested_on())
         self.btn_keikaku_layer.setEnabled(True)
+        self.btn_keikaku_layer.blockSignals(False)
+        self._keikaku_loading = False
 
         # APIキャッシュが未ロードの場合はキャッシュから復元
         if self._current_raw_keikaku is None:
@@ -341,6 +396,7 @@ class KeikakuMixin:
     def _build_keikaku_from_mvt(self):
         """MVTフィーチャーから直接レイヤーを構築してGPKGに保存する（空間照合なし）。"""
         if not self._keikaku_layer_features:
+            self._keikaku_loading = False
             self.lbl_keikaku_count.setText('取得データなし')
             self.btn_keikaku_layer.setEnabled(False)
             return
@@ -369,6 +425,7 @@ class KeikakuMixin:
             feats_to_add.append(qf)
 
         if not feats_to_add:
+            self._keikaku_loading = False
             self.lbl_keikaku_count.setText('取得データなし')
             self.btn_keikaku_layer.setEnabled(False)
             return
@@ -395,6 +452,8 @@ class KeikakuMixin:
         gpkg = self._get_keikaku_gpkg_path()
         if gpkg and os.path.exists(gpkg):
             self._load_keikaku_from_gpkg(gpkg)
+        else:
+            self._keikaku_loading = False
 
         self.btn_keikaku_load.setEnabled(False)
         self.btn_keikaku_layer.setEnabled(True)

@@ -9,7 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QComboBox, QLabel, QTabWidget, QTextBrowser,
     QPushButton, QFrame, QMessageBox,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings
+from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer
 from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
@@ -53,11 +53,18 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         self._current_raw_keikaku    = None
         self._keikaku_vector_layer_id = None
         self._keikaku_layer_features  = []
+        self._keikaku_layer_requested = None
+        self._keikaku_loading         = False
         self._keikaku_cd_to_name      = {}
         self._keikaku_tiles_pending   = 0
         self._keikaku_tiles_received  = 0
         self._current_raw_rinchi      = None
         self._current_rinchi_cache_key = ''
+        self._rinchi_vector_layer_id   = None
+        self._rinchi_layer_features    = []
+        self._rinchi_tiles_pending     = 0
+        self._rinchi_tiles_received    = 0
+        self._rinchi_loading           = False
         self._prev_tab_index          = -1
         self._first_show              = True
         self._layer_type              = 'gpkg'  # 'gpkg' | 'shp'
@@ -313,13 +320,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         root.insertChildNode(0, node)
 
     def _refresh_map_canvas(self):
-        canvas = self.iface.mapCanvas()
-        try:
-            canvas.clearCache()
-        except Exception:
-            pass
-        canvas.refresh()
-        canvas.repaint()
+        QTimer.singleShot(0, self.iface.mapCanvas().refresh)
 
     def _remove_layers_by_name(self, *names):
         for target in names:
@@ -389,13 +390,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self._clear_mori_markers()
             needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, False) or needs_refresh
         elif prev == 3 and index != 3:
+            self._clear_selection_highlights()
             needs_refresh = self._set_layer_visible(self._keikaku_vector_layer_id, False) or needs_refresh
         if index == 2 and prev != 2:
             if self.btn_mori_layer.isChecked():
                 needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, True) or needs_refresh
         elif index == 3 and prev != 3:
-            if self.btn_keikaku_layer.isChecked():
-                needs_refresh = self._set_layer_visible(self._keikaku_vector_layer_id, True) or needs_refresh
+            self._update_keikaku_load_btn()
+            needs_refresh = self._sync_keikaku_layer_visibility(
+                ensure_loaded=True) or needs_refresh
         self._prev_tab_index = index
         QSettings().setValue('fcloud_shizuoka/tab_index', index)
         if needs_refresh:
@@ -428,10 +431,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
                 i = self.combo_rinchi_city.findData(city)
                 if i >= 0:
                     self.combo_rinchi_city.setCurrentIndex(i)
-            ts = None
-            if self._current_rinchi_cache_key:
-                db = self._get_db('林地開発')
-                ts = db.get_fetched_at(self._current_rinchi_cache_key) if db else None
+            self._current_rinchi_cache_key = self._RINCHI_ALL_CACHE_KEY
+            db = self._get_db('林地開発')
+            ts = db.get_fetched_at(self._RINCHI_ALL_CACHE_KEY) if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
         else:
             self.lbl_cache_ts.setText('取得日時: —')
@@ -462,11 +464,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         elif tab == 4:
             if self._current_raw_rinchi is None or not self._current_rinchi_cache_key:
                 return
-            db = self._get_db('林地開発')
-            if db is None:
-                return
-            ts = db.put(self._current_rinchi_cache_key, self._current_raw_rinchi)
-            self.lbl_cache_ts.setText(f'取得日時: {ts}')
+            ts = self._save_rinchi_cache_to_db()
+            if ts:
+                self.lbl_cache_ts.setText(f'取得日時: {ts}')
         self._update_cache_btn_states()
 
     def _update_cache_btn_states(self):
@@ -516,7 +516,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self.lbl_cache_ts.setText('取得日時: 更新中...')
             self._load_keikaku(force=True)
         elif tab == 4:
-            self._search_rinchi(force=True)
+            self._invalidate_rinchi_layer_cache()
+            self.lbl_cache_ts.setText('取得日時: 更新中...')
+            self._search_rinchi(force=True, save_to_db=True)
 
     # ------------------------------------------------------------------
     # レイヤー管理（プロジェクト・GPKG 接続）
@@ -545,6 +547,10 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self.layer_combo.addItem(layer.name(), layer.id())
         if current_id:
             idx = self.layer_combo.findData(current_id)
+            if idx < 0:
+                saved_name = settings.value('fcloud_shizuoka/layer_name', '')
+                if saved_name:
+                    idx = self.layer_combo.findText(saved_name)
             if idx >= 0:
                 self.layer_combo.setCurrentIndex(idx)
         self.layer_combo.blockSignals(False)
@@ -554,6 +560,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self._on_layer_changed()
 
     def _on_layer_changed(self):
+        self._last_combo_id = self.layer_combo.currentData()
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
             try:
                 self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
@@ -572,6 +579,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             QSettings().setValue('fcloud_shizuoka/layer_id', layer_id)
             layer = QgsProject.instance().mapLayer(layer_id)
             if layer:
+                QSettings().setValue('fcloud_shizuoka/layer_name', layer.name())
                 self._connected_layer = layer
                 layer.selectionChanged.connect(self._on_selection_changed)
                 flds = [f.name() for f in layer.fields()]
@@ -793,7 +801,10 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         self._clear_mori_markers()
         self._cleanup_plugin_layers()
         for reply in list(self._pending_replies):
-            reply.abort()
+            try:
+                reply.abort()
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def cleanup_on_unload(self):
