@@ -379,11 +379,13 @@ class MoriMixin:
         self.lbl_mori_count.setText('ポリゴン統合中...')
         try:
             import processing
+            from qgis.core import QgsProcessingContext, QgsProcessingFeedback
+            ctx = QgsProcessingContext()
             result = processing.run('native:dissolve', {
                 'INPUT': layer,
                 'FIELD': ['管理番号'],
                 'OUTPUT': 'memory:',
-            })
+            }, context=ctx, feedback=QgsProcessingFeedback())
             save_layer = result['OUTPUT']
         except Exception as e:
             print(f'[fcloud] mori dissolve failed, using raw layer: {e}')
@@ -417,24 +419,74 @@ class MoriMixin:
         self.lbl_mori_count.setText(f'{total}件' if total else '')
 
     def _apply_mori_style(self, layer):
-        from qgis.core import QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsFillSymbol
-        idx = layer.fields().indexOf('管理番号')
-        unique_vals = sorted(str(v) for v in layer.uniqueValues(idx)
-                             if v is not None and str(v) not in ('', 'NULL'))
-        cats = []
+        from collections import defaultdict
+        from qgis.core import QgsRuleBasedRenderer, QgsFillSymbol
+
+        _null = {'', 'NULL', 'None'}
+        # {seibi: {nendo: [kanri, ...]}}
+        groups = defaultdict(lambda: defaultdict(list))
+        kanri_seen = set()
+
+        raw = getattr(self, '_current_raw_mori', None)
+        if raw is not None:
+            for rec in self._extract_records(raw):
+                if not isinstance(rec, dict):
+                    continue
+                kanri = str(rec.get('管理番号', '') or '')
+                if not kanri or kanri in _null or kanri in kanri_seen:
+                    continue
+                kanri_seen.add(kanri)
+                nendo = str(rec.get('年度', '') or '')
+                seibi = str(rec.get('申請者_整備者_氏名', '') or '')
+                nendo = '' if nendo in _null else nendo
+                seibi = '' if seibi in _null else seibi
+                groups[seibi][nendo].append(kanri)
+
+        idx_kanri = layer.fields().indexOf('管理番号')
+        if idx_kanri >= 0:
+            for val in layer.uniqueValues(idx_kanri):
+                kanri = str(val) if val is not None else ''
+                if kanri and kanri not in _null and kanri not in kanri_seen:
+                    groups[''][''].append(kanri)
+
+        def _nendo_key(n):
+            try:
+                return -int(n)
+            except (ValueError, TypeError):
+                return 0
+
+        root = QgsRuleBasedRenderer.Rule(None)
         phi = 0.618033988749895
         hue = 0.17
-        for val in unique_vals:
-            hue = (hue + phi) % 1.0
-            r, g, b = colorsys.hsv_to_rgb(hue, 0.60, 0.88)
-            ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
-            sym = QgsFillSymbol.createSimple({
-                'color':         f'{ri},{gi},{bi},160',
-                'outline_color': f'{max(0,ri-50)},{max(0,gi-50)},{max(0,bi-50)},220',
-                'outline_width': '0.4',
-            })
-            cats.append(QgsRendererCategory(val, sym, val))
-        layer.setRenderer(QgsCategorizedSymbolRenderer('管理番号', cats))
+
+        for seibi in sorted(groups):
+            seibi_rule = QgsRuleBasedRenderer.Rule(None)
+            seibi_rule.setLabel(seibi if seibi else '（整備者不明）')
+
+            for nendo in sorted(groups[seibi], key=_nendo_key):
+                nendo_rule = QgsRuleBasedRenderer.Rule(None)
+                nendo_rule.setLabel(nendo if nendo else '（年度不明）')
+
+                for kanri in sorted(groups[seibi][nendo]):
+                    hue = (hue + phi) % 1.0
+                    r, g, b = colorsys.hsv_to_rgb(hue, 0.60, 0.88)
+                    ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
+                    sym = QgsFillSymbol.createSimple({
+                        'color':         f'{ri},{gi},{bi},160',
+                        'outline_color': f'{max(0,ri-50)},{max(0,gi-50)},{max(0,bi-50)},220',
+                        'outline_width': '0.4',
+                    })
+                    kanri_rule = QgsRuleBasedRenderer.Rule(sym)
+                    kanri_rule.setLabel(kanri)
+                    kanri_rule.setFilterExpression(
+                        f"\"管理番号\" = '{kanri.replace(chr(39), chr(39)*2)}'")
+                    nendo_rule.appendChild(kanri_rule)
+
+                seibi_rule.appendChild(nendo_rule)
+
+            root.appendChild(seibi_rule)
+
+        layer.setRenderer(QgsRuleBasedRenderer(root))
 
     def _remove_mori_vector_layer(self):
         self._clear_mori_markers()
