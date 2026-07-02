@@ -20,18 +20,23 @@ from qgis.core import (
 from qgis.gui import QgsRubberBand
 
 from .cache_db import CacheDB
-from .constants import _API_BASE, _CITY_TO_NORIN, _PRIMARY_FIELDS, _HISTORY_FIELDS
-from .tab_hoanrin import HoanrinMixin
-from .tab_mori    import MoriMixin
-from .tab_keikaku import KeikakuMixin
-from .tab_rinchi  import RinchiMixin
+from .constants import (
+    _API_BASE, _CITY_TO_NORIN,
+    _PRIMARY_FIELDS, _HISTORY_FIELDS,
+    _CD_API_PRIMARY_FIELDS, _CD_API_HISTORY_FIELDS,
+)
+from .tab_hoanrin   import HoanrinMixin
+from .tab_mori      import MoriMixin
+from .tab_keikaku   import KeikakuMixin
+from .tab_rinchi    import RinchiMixin
+from .tab_shinrinbo import ShinrinboMixin
 
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
 _HL_SEL_FILL   = QColor(210,  30,  30,  25)
 
 
-class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDockWidget):
+class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QDockWidget):
 
     def __init__(self, iface, highlights=None, parent=None):
         super().__init__('静岡県森林クラウド', parent or iface.mainWindow())
@@ -53,7 +58,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         self._current_raw_keikaku    = None
         self._keikaku_vector_layer_id = None
         self._keikaku_layer_features  = []
-        self._keikaku_layer_requested = None
+        self._keikaku_layer_requested = False
         self._keikaku_loading         = False
         self._keikaku_cd_to_name      = {}
         self._keikaku_tiles_pending   = 0
@@ -65,9 +70,16 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         self._rinchi_tiles_pending     = 0
         self._rinchi_tiles_received    = 0
         self._rinchi_loading           = False
-        self._prev_tab_index          = -1
-        self._first_show              = True
-        self._layer_type              = 'gpkg'  # 'gpkg' | 'shp'
+        self._prev_tab_index           = -1
+        self._first_show               = True
+        self._layer_type               = 'gpkg'  # 'gpkg' | 'cd_gpkg' | 'shp'
+        self._current_shinrinbo_key    = ''
+        self._shinrinbo_api_ids        = []
+        self._shinrinbo_generation     = 0
+        self._shinrinbo_tab_index      = 5
+        self._shinrinbo_col_map        = []
+        self._mvt_tile_cache           = {}  # (z,x,y) → {key1: fid}
+        self._info_gen                 = 0
 
         self.setAllowedAreas(
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
@@ -147,11 +159,12 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         right_v.setSpacing(0)
 
         self.cloud_tab = QTabWidget()
-        self.cloud_tab.addTab(self._build_tab_hoanrin(), '保安林台帳')
-        self.cloud_tab.addTab(self._build_tab_seibi(),   '整備事業')
-        self.cloud_tab.addTab(self._build_tab_mori(),    '森の力')
-        self.cloud_tab.addTab(self._build_tab_keikaku(), '経営計画')
-        self.cloud_tab.addTab(self._build_tab_rinchi(),  '林地開発')
+        self.cloud_tab.addTab(self._build_tab_hoanrin(),    '保安林台帳')
+        self.cloud_tab.addTab(self._build_tab_seibi(),     '整備事業')
+        self.cloud_tab.addTab(self._build_tab_mori(),      '森の力')
+        self.cloud_tab.addTab(self._build_tab_keikaku(),   '経営計画')
+        self.cloud_tab.addTab(self._build_tab_rinchi(),    '林地開発')
+        self.cloud_tab.addTab(self._build_tab_shinrinbo(), '森林簿')
 
         self.btn_mori_fullscreen = QPushButton('全画面')
         self.btn_mori_fullscreen.setCheckable(True)
@@ -268,6 +281,76 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         reply = QgsNetworkAccessManager.instance().post(req, body)
         self._pending_replies.append(reply)
         reply.finished.connect(lambda: self._handle_reply(reply, callback))
+
+    def _get_binary(self, url, callback):
+        req = QNetworkRequest(QUrl(url))
+        req.setRawHeader(b'Accept', b'*/*')
+        req.setRawHeader(
+            b'Referer',
+            b'https://fcloud.pref.shizuoka.jp/fgis/?version=1.26.0525.a')
+        reply = QgsNetworkAccessManager.instance().get(req)
+        self._pending_replies.append(reply)
+        reply.finished.connect(lambda: self._handle_binary_reply(reply, callback))
+
+    def _handle_binary_reply(self, reply, callback):
+        data = None
+        if reply.error() == QNetworkReply.NoError:
+            data = bytes(reply.readAll())
+        else:
+            print(f'[fcloud_shizuoka] MVT error: {reply.errorString()}')
+        if reply in self._pending_replies:
+            self._pending_replies.remove(reply)
+        reply.deleteLater()
+        callback(data)
+
+    def _get_api(self, url, callback):
+        req = QNetworkRequest(QUrl(url))
+        req.setRawHeader(b'Accept', b'application/json, text/plain, */*')
+        req.setRawHeader(b'Origin', b'https://fcloud.pref.shizuoka.jp')
+        req.setRawHeader(
+            b'Referer',
+            b'https://fcloud.pref.shizuoka.jp/fgis/?version=1.26.0220.a')
+        reply = QgsNetworkAccessManager.instance().get(req)
+        self._pending_replies.append(reply)
+        reply.finished.connect(lambda: self._handle_reply(reply, callback))
+
+    def _on_cd_api_result(self, data):
+        if data is None:
+            self.info_browser.setHtml(
+                '<p style="color:red;padding:8px;">取得失敗（ネットワークエラー）</p>'
+            )
+            return
+        parts = ['<table style="border-collapse:collapse;width:100%;">']
+        parts.append(
+            '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
+            'padding:3px;">基本情報（森林クラウド）</td></tr>')
+        for src, label in _CD_API_PRIMARY_FIELDS:
+            val = data.get(src)
+            if val is None or str(val) in ('', 'NULL', '0', 'None'):
+                continue
+            parts.append(
+                f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;">'
+                f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
+        hist_rows = []
+        for y_f, m_f, e_f in _CD_API_HISTORY_FIELDS:
+            yr = data.get(y_f)
+            if not yr or str(yr) in ('0', '', 'NULL', 'None'):
+                continue
+            method = data.get(m_f) or ''
+            etype  = data.get(e_f) or ''
+            if not method and not etype:
+                continue
+            hist_rows.append(
+                f'<tr><td colspan="2" style="padding:2px 4px;'
+                f'border-bottom:1px solid #eee;">'
+                f'{yr}年度: {method}（{etype}）</td></tr>')
+        if hist_rows:
+            parts.append(
+                '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
+                'padding:3px;">施業履歴</td></tr>')
+            parts.extend(hist_rows)
+        parts.append('</table>')
+        self.info_browser.setHtml(''.join(parts))
 
     def _handle_reply(self, reply, callback):
         data = None
@@ -435,6 +518,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             db = self._get_db('林地開発')
             ts = db.get_fetched_at(self._RINCHI_ALL_CACHE_KEY) if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
+        elif index == 5:  # 森林簿
+            if self._layer_type == 'gpkg':
+                self.lbl_cache_ts.setText('ローカルデータ')
+            elif self._current_shinrinbo_key:
+                db = self._get_db('森林簿')
+                ts = db.get_fetched_at(self._current_shinrinbo_key) if db else None
+                self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
+            else:
+                self.lbl_cache_ts.setText('取得日時: —')
         else:
             self.lbl_cache_ts.setText('取得日時: —')
         self._update_cache_btn_states()
@@ -483,6 +575,13 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             # 整備事業: 未実装
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
+        elif tab == 5:
+            # 森林簿: 自動保存のためローカル保存不要。更新はAPIレイヤー選択時のみ有効
+            self.btn_cache_save.setEnabled(False)
+            can_update = (self._layer_type != 'gpkg'
+                          and bool(self._current_shinrinbo_key)
+                          and not no_data)
+            self.btn_cache_update.setEnabled(can_update)
         else:
             # 保安林・森の力・林地開発: 未保存なら保存可、保存済みなら更新可
             self.btn_cache_save.setEnabled(unsaved)
@@ -519,6 +618,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self._invalidate_rinchi_layer_cache()
             self.lbl_cache_ts.setText('取得日時: 更新中...')
             self._search_rinchi(force=True, save_to_db=True)
+        elif tab == 5:
+            if self._layer_type != 'gpkg' and self._shinrinbo_api_ids:
+                self._update_shinrinbo_cache()
 
     # ------------------------------------------------------------------
     # レイヤー管理（プロジェクト・GPKG 接続）
@@ -530,11 +632,17 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
 
     def _refresh_layer_combo(self, *_):
         settings = QSettings()
+        # アクティブレイヤーが有効な対象なら優先、なければ保存値を使用
+        active = self.iface.activeLayer()
+        active_id = active.id() if isinstance(active, QgsVectorLayer) else ''
         current_id = (self.layer_combo.currentData()
                       or settings.value('fcloud_shizuoka/layer_id', ''))
         self.layer_combo.blockSignals(True)
         self.layer_combo.clear()
-        for layer in QgsProject.instance().mapLayers().values():
+        # レイヤーパネルの並び順で追加
+        root = QgsProject.instance().layerTreeRoot()
+        for node in root.findLayers():
+            layer = node.layer()
             if not isinstance(layer, QgsVectorLayer):
                 continue
             if layer.name().startswith('fcloud_'):
@@ -545,14 +653,16 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             if layer.fields().indexOf('KEY1') < 0:
                 continue
             self.layer_combo.addItem(layer.name(), layer.id())
-        if current_id:
+        # アクティブレイヤーがコンボに存在すれば優先選択、なければ保存値で復元
+        idx = self.layer_combo.findData(active_id) if active_id else -1
+        if idx < 0 and current_id:
             idx = self.layer_combo.findData(current_id)
             if idx < 0:
                 saved_name = settings.value('fcloud_shizuoka/layer_name', '')
                 if saved_name:
                     idx = self.layer_combo.findText(saved_name)
-            if idx >= 0:
-                self.layer_combo.setCurrentIndex(idx)
+        if idx >= 0:
+            self.layer_combo.setCurrentIndex(idx)
         self.layer_combo.blockSignals(False)
         new_id = self.layer_combo.currentData()
         if new_id != getattr(self, '_last_combo_id', None):
@@ -567,6 +677,11 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             except Exception:
                 pass
         self._connected_layer = None
+        self._current_shinrinbo_key = ''
+        self._shinrinbo_api_ids = []
+        self._shinrinbo_col_map = []
+        self.tbl_shinrinbo.setRowCount(0)
+        self.tbl_shinrinbo.setColumnCount(0)
 
         layer_id = self.layer_combo.currentData()
         if not layer_id:
@@ -581,9 +696,17 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             if layer:
                 QSettings().setValue('fcloud_shizuoka/layer_name', layer.name())
                 self._connected_layer = layer
+                self.iface.setActiveLayer(layer)
                 layer.selectionChanged.connect(self._on_selection_changed)
                 flds = [f.name() for f in layer.fields()]
-                self._layer_type = 'shp' if '市町村名称' not in flds and '市町村CD' in flds else 'gpkg'
+                src = layer.source().lower()
+                if '市町村名称' in flds:
+                    self._layer_type = 'gpkg'
+                elif '市町村CD' in flds and 'ID' in flds:
+                    self._layer_type = 'cd_gpkg'
+                else:
+                    self._layer_type = 'shp'
+                self._init_shinrinbo_headers()
                 self._refresh_city_combo(layer)
         self._update_keikaku_load_btn()
 
@@ -650,12 +773,18 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
         if not features:
             self.lbl_selected.setText('GPKGレイヤーで選択してください')
             self.info_browser.clear()
+            self._refresh_shinrinbo_tab([])
             return
         feat = features[0]
         fnames = feat.fields().names()
         if self._layer_type == 'shp':
             key1 = feat['KEY1'] if 'KEY1' in fnames else ''
             self.lbl_selected.setText(f'小班: {key1}')
+        elif self._layer_type == 'cd_gpkg':
+            rinpan = feat['林班']      if '林班'      in fnames else ''
+            junrin = feat['準林班CD']  if '準林班CD'  in fnames else ''
+            kohan  = feat['小班_親番'] if '小班_親番' in fnames else ''
+            self.lbl_selected.setText(f'小班: {rinpan}-{junrin}-{kohan}')
         else:
             rinpan = feat['林班_森林簿']     if '林班_森林簿'     in fnames else ''
             junrin = feat['準林班名称']       if '準林班名称'       in fnames else ''
@@ -663,6 +792,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
             self.lbl_selected.setText(f'小班: {rinpan}-{junrin}-{kohan}')
         self._show_feature_info(feat)
         self.left_tab.setCurrentIndex(0)
+        self._refresh_shinrinbo_tab(features)
 
     def _show_feature_info(self, feat):
         if self._layer_type == 'shp':
@@ -672,6 +802,29 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, QDock
                 'Shinrinbo Code Converter で森林簿と結合したGPKGを作成すると'
                 '詳細属性が表示されます。</p>'
             )
+            return
+        if self._layer_type == 'cd_gpkg':
+            self.info_browser.setHtml(
+                '<p style="color:gray;padding:8px;">小班ID解決中...</p>'
+            )
+            self._info_gen += 1
+            gen = self._info_gen
+
+            def on_fid_resolved(fid_list):
+                if self._info_gen != gen:
+                    return
+                fid = fid_list[0] if fid_list else None
+                if fid is None:
+                    self.info_browser.setHtml(
+                        '<p style="color:red;padding:8px;">小班IDが特定できませんでした</p>'
+                    )
+                    return
+                self._get_api(
+                    f'{_API_BASE}/advanced-search/森林簿/{fid}',
+                    lambda data: self._info_gen == gen and self._on_cd_api_result(data),
+                )
+
+            self._resolve_fids_via_mvt([feat], on_fid_resolved)
             return
         fnames = feat.fields().names()
         parts = ['<table style="border-collapse:collapse;width:100%;">']

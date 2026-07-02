@@ -39,13 +39,15 @@ class KeikakuMixin:
             return False
         if not self._has_connected_keikaku_source():
             return False
+        if not self._keikaku_layer_requested_on():
+            return False
 
         gpkg = self._get_keikaku_gpkg_path()
         if gpkg and os.path.exists(gpkg):
             self._load_keikaku_from_gpkg(gpkg)
             return bool(self._keikaku_vector_layer_id)
 
-        if self._keikaku_layer_requested_on() and not self._keikaku_loading:
+        if not self._keikaku_loading:
             self._load_keikaku()
         return False
 
@@ -133,8 +135,6 @@ class KeikakuMixin:
             self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
             return
 
-        if self._keikaku_layer_requested is None:
-            self._keikaku_layer_requested = True
         self.btn_keikaku_layer.blockSignals(True)
         self.btn_keikaku_layer.setChecked(self._keikaku_layer_requested_on())
         self.btn_keikaku_layer.blockSignals(False)
@@ -314,10 +314,6 @@ class KeikakuMixin:
             return
         self._apply_keikaku_style(layer)
 
-        # 経営計画は県管轄のため全域表示（エクステントフィルタなし）
-        # レイヤー生成時も、ユーザーが最後に選んだ表示希望状態を優先する。
-        if self._keikaku_layer_requested is None:
-            self._keikaku_layer_requested = True
         self._add_layer_above_gpkg(layer, visible=self._should_show_keikaku_layer())
         self._keikaku_vector_layer_id = layer.id()
         self.btn_keikaku_layer.blockSignals(True)
