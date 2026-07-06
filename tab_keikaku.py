@@ -20,6 +20,7 @@ from .constants import (
     _API_BASE, _API_CITY_MAP,
     _CD_CITY, _SHIZUOKA_BBOX, _KEIKAKU_MVT_ZOOM,
 )
+from .layer_cleanup import remove_project_layer
 
 
 class KeikakuMixin:
@@ -501,9 +502,7 @@ class KeikakuMixin:
     def _remove_keikaku_vector_layer(self):
         self._clear_selection_highlights()
         if self._keikaku_vector_layer_id:
-            layer = QgsProject.instance().mapLayer(self._keikaku_vector_layer_id)
-            if layer and not sip.isdeleted(layer):
-                QgsProject.instance().removeMapLayer(self._keikaku_vector_layer_id)
+            remove_project_layer(QgsProject.instance(), self._keikaku_vector_layer_id)
             self._keikaku_vector_layer_id = None
         self._keikaku_layer_features = []
         self._refresh_map_canvas()

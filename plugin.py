@@ -5,6 +5,7 @@ from qgis.PyQt.QtWidgets import QAction, QApplication
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsProject
+from .layer_cleanup import remove_project_layer
 
 PLUGIN_DIR = os.path.dirname(__file__)
 
@@ -59,13 +60,14 @@ class FcloudShizuoka:
             'fcloud_林道', 'fcloud_森の力実施箇所',
             'fcloud_経営計画作成箇所', '林地開発_許可', '林地開発_連絡調整',
         }
+        project = QgsProject.instance()
         to_remove = [
-            lid for lid, layer in list(QgsProject.instance().mapLayers().items())
+            lid for lid, layer in list(project.mapLayers().items())
             if layer.name() in stale_names
         ]
         for lid in to_remove:
-            QgsProject.instance().removeMapLayer(lid)
-        root = QgsProject.instance().layerTreeRoot()
+            remove_project_layer(project, lid)
+        root = project.layerTreeRoot()
         while root.findGroup('林地開発'):
             root.removeChildNode(root.findGroup('林地開発'))
 

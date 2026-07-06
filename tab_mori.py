@@ -20,6 +20,7 @@ from qgis.gui import QgsVertexMarker
 from qgis.PyQt.QtCore import QVariant
 
 from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST
+from .layer_cleanup import remove_project_layer
 
 
 class MoriMixin:
@@ -492,9 +493,7 @@ class MoriMixin:
         self._clear_mori_markers()
         self._clear_selection_highlights()
         if self._mori_vector_layer_id:
-            layer = QgsProject.instance().mapLayer(self._mori_vector_layer_id)
-            if layer and not sip.isdeleted(layer):
-                QgsProject.instance().removeMapLayer(self._mori_vector_layer_id)
+            remove_project_layer(QgsProject.instance(), self._mori_vector_layer_id)
             self._mori_vector_layer_id = None
         self._mori_layer_features = []
         self._mori_tiles_pending = 0

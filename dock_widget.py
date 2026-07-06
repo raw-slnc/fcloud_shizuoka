@@ -25,6 +25,7 @@ from .constants import (
     _PRIMARY_FIELDS, _HISTORY_FIELDS,
     _CD_API_PRIMARY_FIELDS, _CD_API_HISTORY_FIELDS,
 )
+from .layer_cleanup import remove_project_layer
 from .tab_hoanrin   import HoanrinMixin
 from .tab_mori      import MoriMixin
 from .tab_keikaku   import KeikakuMixin
@@ -406,16 +407,17 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         QTimer.singleShot(0, self.iface.mapCanvas().refresh)
 
     def _remove_layers_by_name(self, *names):
+        project = QgsProject.instance()
         for target in names:
             while True:
                 found_id = None
-                for lid, layer in list(QgsProject.instance().mapLayers().items()):
+                for lid, layer in list(project.mapLayers().items()):
                     if layer.name() == target:
                         found_id = lid
                         break
                 if found_id is None:
                     break
-                QgsProject.instance().removeMapLayer(found_id)
+                remove_project_layer(project, found_id)
 
     def _cleanup_plugin_layers(self):
         self._remove_mori_vector_layer()
@@ -451,9 +453,10 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             if layer.isValid():
                 self._add_layer_above_gpkg(layer, visible=True)
         else:
-            for lid, layer in list(QgsProject.instance().mapLayers().items()):
+            project = QgsProject.instance()
+            for lid, layer in list(project.mapLayers().items()):
                 if layer.name() == name:
-                    QgsProject.instance().removeMapLayer(lid)
+                    remove_project_layer(project, lid)
                     break
 
     # ------------------------------------------------------------------

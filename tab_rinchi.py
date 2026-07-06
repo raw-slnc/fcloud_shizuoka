@@ -21,6 +21,7 @@ from .constants import (
     _API_BASE, _API_CITY_MAP, _CITY_CD, _RINCHI_MOKUTEKI,
     _SHIZUOKA_BBOX,
 )
+from .layer_cleanup import remove_project_layer
 
 
 class RinchiMixin:
@@ -456,9 +457,7 @@ class RinchiMixin:
     def _remove_rinchi_vector_layer(self):
         self._clear_selection_highlights()
         if self._rinchi_vector_layer_id:
-            layer = QgsProject.instance().mapLayer(self._rinchi_vector_layer_id)
-            if layer and not sip.isdeleted(layer):
-                QgsProject.instance().removeMapLayer(self._rinchi_vector_layer_id)
+            remove_project_layer(QgsProject.instance(), self._rinchi_vector_layer_id)
             self._rinchi_vector_layer_id = None
         self._rinchi_layer_features = []
         self._rinchi_tiles_pending = 0
@@ -472,7 +471,7 @@ class RinchiMixin:
         while root.findGroup('林地開発'):
             grp = root.findGroup('林地開発')
             for child in grp.findLayers():
-                QgsProject.instance().removeMapLayer(child.layerId())
+                remove_project_layer(QgsProject.instance(), child.layerId())
             root.removeChildNode(grp)
         self.btn_rinchi_layer.blockSignals(True)
         self.btn_rinchi_layer.setChecked(False)
