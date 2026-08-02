@@ -7,7 +7,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QPushButton, QTableWidgetItem,
 )
-from qgis.PyQt.QtCore import Qt, QUrl
+from qgis.PyQt.QtCore import Qt, QUrl, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
@@ -635,6 +635,9 @@ class MoriMixin:
         if on:
             self.setFloating(True)
             self.showMaximized()
+            # showMaximized() がネイティブウィンドウのオーナー関係を
+            # 再設定してしまうため、次のイベントループで解除し直す
+            QTimer.singleShot(0, self._detach_native_window_owner)
             self.btn_mori_fullscreen.setText('格納')
         else:
             self.showNormal()
