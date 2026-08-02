@@ -104,15 +104,17 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _sync_floating_window_flags(self, is_floating):
         """フロート時は通常のトップレベルウィンドウ扱いにし、Alt+Tabで個別対象にする。"""
-        if not is_floating:
-            return
-        geometry = self.geometry()
-        self.setWindowFlag(Qt.WindowType.Tool, False)
-        self.setWindowFlag(Qt.WindowType.Window, True)
-        self.show()
-        if geometry.isValid():
-            self.setGeometry(geometry)
-        self._detach_native_window_owner()
+        if is_floating:
+            geometry = self.geometry()
+            self.setWindowFlag(Qt.WindowType.Tool, False)
+            self.setWindowFlag(Qt.WindowType.Window, True)
+            self.show()
+            if geometry.isValid():
+                self.setGeometry(geometry)
+            self._detach_native_window_owner()
+
+        if hasattr(self, 'btn_mori_fullscreen') and self.btn_mori_fullscreen.isChecked() != is_floating:
+            self.btn_mori_fullscreen.setChecked(is_floating)
 
     def _detach_native_window_owner(self):
         """QtがメインウィンドウをオーナーにセットするHWNDを解除する（Windowsはowned windowをAlt+Tabから除外するため）。"""

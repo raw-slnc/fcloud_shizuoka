@@ -633,7 +633,8 @@ class MoriMixin:
 
     def _toggle_mori_fullscreen(self, on):
         if on:
-            self.setFloating(True)
+            if not self.isFloating():
+                self.setFloating(True)
             self.showMaximized()
             # showMaximized() がネイティブウィンドウのオーナー関係を
             # 再設定してしまうため、次のイベントループで解除し直す
@@ -641,5 +642,6 @@ class MoriMixin:
             self.btn_mori_fullscreen.setText('格納')
         else:
             self.showNormal()
-            self.setFloating(False)
+            if self.isFloating():
+                self.setFloating(False)
             self.btn_mori_fullscreen.setText('全画面')
