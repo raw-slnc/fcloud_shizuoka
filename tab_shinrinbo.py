@@ -183,6 +183,11 @@ class ShinrinboMixin:
             self._update_cache_btn_states()
             return
 
+        # 地図上の選択はテーブルの行選択と連動させない。
+        # ラバーバンド/ズームはテーブルで明示的に行を選んだ時だけ行う。
+        self._clear_selection_highlights()
+        self._clear_cloud_record_info()
+
         if self._layer_type == 'gpkg':
             self._build_shinrinbo_table_gpkg(features)
             self._sync_shinrinbo_cache_ts('ローカルデータ')
@@ -488,8 +493,7 @@ class ShinrinboMixin:
                 item.setData(Qt.UserRole, feat)
                 self.tbl_shinrinbo.setItem(row, col, item)
 
-        if features:
-            self.tbl_shinrinbo.selectRow(0)
+        self.tbl_shinrinbo.clearSelection()
 
     def _build_shinrinbo_table_api(self, results):
         col_map = getattr(self, '_shinrinbo_col_map', [])
@@ -506,8 +510,7 @@ class ShinrinboMixin:
                 item.setData(Qt.UserRole, d)
                 self.tbl_shinrinbo.setItem(row, col, item)
 
-        if results:
-            self.tbl_shinrinbo.selectRow(0)
+        self.tbl_shinrinbo.clearSelection()
 
     # ------------------------------------------------------------------
     # 行選択 → kozu連携
@@ -541,7 +544,7 @@ class ShinrinboMixin:
             layer = self._connected_layer
             if geom and not geom.isEmpty() and layer is not None and not sip.isdeleted(layer):
                 self._add_selection_highlight(geom, layer.crs())
-                self._refresh_map_canvas()
+                self._zoom_to_selection_highlights()
 
         if not self.btn_kozu_shinrinbo.isChecked():
             return

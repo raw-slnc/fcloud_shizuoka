@@ -769,14 +769,29 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             self._last_combo_id = new_id
             self._on_layer_changed()
 
-    def _on_layer_changed(self):
-        self._last_combo_id = self.layer_combo.currentData()
-        self._restore_selection_color()
+    def _connect_selection_signal(self):
+        if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
+            # 多重接続を避けるため、一旦切ってから繋ぎ直す（未接続でも例外は無視）
+            try:
+                self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
+            except Exception:
+                pass
+            try:
+                self._connected_layer.selectionChanged.connect(self._on_selection_changed)
+            except Exception:
+                pass
+
+    def _disconnect_selection_signal(self):
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
             try:
                 self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
             except Exception:
                 pass
+
+    def _on_layer_changed(self):
+        self._last_combo_id = self.layer_combo.currentData()
+        self._restore_selection_color()
+        self._disconnect_selection_signal()
         self._connected_layer = None
         self._current_shinrinbo_key = ''
         self._shinrinbo_api_ids = []
@@ -798,7 +813,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 QSettings().setValue('fcloud_shizuoka/layer_name', layer.name())
                 self._connected_layer = layer
                 self.iface.setActiveLayer(layer)
-                layer.selectionChanged.connect(self._on_selection_changed)
+                if self.isVisible():
+                    self._connect_selection_signal()
                 self._apply_selection_color(layer)
                 flds = [f.name() for f in layer.fields()]
                 src = layer.source().lower()
@@ -1092,9 +1108,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def showEvent(self, event):
         super().showEvent(event)
-        if (self._connected_layer is not None and not sip.isdeleted(self._connected_layer)
-                and self._sel_color_layer_id is None):
-            self._apply_selection_color(self._connected_layer)
+        if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
+            if self._sel_color_layer_id is None:
+                self._apply_selection_color(self._connected_layer)
+            self._connect_selection_signal()
+            self._on_selection_changed(None, None, None)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._disconnect_selection_signal()
 
     def closeEvent(self, event):
         self._restore_selection_color()
