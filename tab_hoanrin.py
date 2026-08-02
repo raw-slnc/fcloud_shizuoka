@@ -479,21 +479,23 @@ class HoanrinMixin:
     # 公図連携
     # ------------------------------------------------------------------
 
-    def _update_kozu_btn(self):
+    def _update_kozu_btn(self, btn=None):
         from qgis.utils import plugins as _qplugins
+        btn = btn or self.btn_kozu
         installed = 'kozu_xml_integrator' in _qplugins
-        self.btn_kozu.setEnabled(installed)
+        btn.setEnabled(installed)
         if not installed:
-            self.btn_kozu.setChecked(False)
-            self.btn_kozu.setStyleSheet('color: gray;')
+            btn.setChecked(False)
+            btn.setStyleSheet('color: gray;')
         else:
-            on = self.btn_kozu.isChecked()
-            self.btn_kozu.setText('公図連携ON' if on else '公図連携OFF')
-            self.btn_kozu.setStyleSheet('' if on else 'color: gray;')
+            on = btn.isChecked()
+            btn.setText('公図連携ON' if on else '公図連携OFF')
+            btn.setStyleSheet('' if on else 'color: gray;')
 
-    def _on_kozu_toggled(self, checked):
-        self.btn_kozu.setText('公図連携ON' if checked else '公図連携OFF')
-        self.btn_kozu.setStyleSheet('' if checked else 'color: gray;')
+    def _on_kozu_toggled(self, checked, btn=None):
+        btn = btn or self.btn_kozu
+        btn.setText('公図連携ON' if checked else '公図連携OFF')
+        btn.setStyleSheet('' if checked else 'color: gray;')
         if checked:
             from qgis.utils import plugins as _qplugins
             kozu = _qplugins.get('kozu_xml_integrator')

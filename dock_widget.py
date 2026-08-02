@@ -2,6 +2,7 @@
 import json
 import os
 import sip
+import sys
 import urllib.parse
 
 from qgis.PyQt.QtWidgets import (
@@ -38,6 +39,7 @@ _HL_SEL_FILL   = QColor(210,  30,  30,  25)
 
 
 class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QDockWidget):
+    _TAB_ORDER_VERSION = 2
 
     def __init__(self, iface, highlights=None, parent=None):
         super().__init__('静岡県森林クラウド', parent or iface.mainWindow())
@@ -45,6 +47,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
         # 全タブ共有の状態変数
         self._connected_layer        = None
+        self._sel_color_layer_id     = None  # 選択ハイライト色を変更中のレイヤーID
+        self._sel_color_orig         = None  # 変更前の選択色（復元用）
+        self._sel_mode_orig          = None  # 変更前のselectionRenderingMode（復元用）
         self._hoanrin_highlights     = highlights if highlights is not None else []
         self._selection_highlights   = []
         self._mori_markers           = []
@@ -77,10 +82,13 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._current_shinrinbo_key    = ''
         self._shinrinbo_api_ids        = []
         self._shinrinbo_generation     = 0
-        self._shinrinbo_tab_index      = 5
+        self._shinrinbo_tab_index      = 0
         self._shinrinbo_col_map        = []
         self._mvt_tile_cache           = {}  # (z,x,y) → {key1: fid}
         self._info_gen                 = 0
+        self._layer_refresh_timer      = QTimer(self)
+        self._layer_refresh_timer.setSingleShot(True)
+        self._layer_refresh_timer.timeout.connect(self._refresh_layer_combo)
 
         self.setAllowedAreas(
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
@@ -88,6 +96,48 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._build_ui()
         self._remove_rinchi_layers()
         self._connect_project_signals()
+        self.topLevelChanged.connect(self._sync_floating_window_flags)
+
+    # ------------------------------------------------------------------
+    # フロート時にAlt+Tabで個別に切り替えられるようにする
+    # ------------------------------------------------------------------
+
+    def _sync_floating_window_flags(self, is_floating):
+        """フロート時は通常のトップレベルウィンドウ扱いにし、Alt+Tabで個別対象にする。"""
+        if not is_floating:
+            return
+        geometry = self.geometry()
+        self.setWindowFlag(Qt.WindowType.Tool, False)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.show()
+        if geometry.isValid():
+            self.setGeometry(geometry)
+        self._detach_native_window_owner()
+
+    def _detach_native_window_owner(self):
+        """QtがメインウィンドウをオーナーにセットするHWNDを解除する（Windowsはowned windowをAlt+Tabから除外するため）。"""
+        if not sys.platform.startswith('win'):
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            set_long_ptr = getattr(user32, 'SetWindowLongPtrW', user32.SetWindowLongW)
+            get_long_ptr = getattr(user32, 'GetWindowLongPtrW', user32.GetWindowLongW)
+            hwnd = int(self.winId())
+            gwlp_hwndparent = -8
+            gwl_exstyle = -20
+            ws_ex_appwindow = 0x00040000
+            ws_ex_toolwindow = 0x00000080
+            swp_flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
+
+            set_long_ptr(hwnd, gwlp_hwndparent, 0)
+            ex_style = get_long_ptr(hwnd, gwl_exstyle)
+            ex_style = (ex_style | ws_ex_appwindow) & ~ws_ex_toolwindow
+            set_long_ptr(hwnd, gwl_exstyle, ex_style)
+            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, swp_flags)
+        except (OSError, AttributeError, ValueError):
+            pass
 
     # ------------------------------------------------------------------
     # UI 構築
@@ -160,12 +210,12 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         right_v.setSpacing(0)
 
         self.cloud_tab = QTabWidget()
-        self.cloud_tab.addTab(self._build_tab_hoanrin(),    '保安林台帳')
+        self.cloud_tab.addTab(self._build_tab_shinrinbo(), '森林簿')
+        self.cloud_tab.addTab(self._build_tab_hoanrin(),   '保安林台帳')
         self.cloud_tab.addTab(self._build_tab_seibi(),     '整備事業')
         self.cloud_tab.addTab(self._build_tab_mori(),      '森の力')
         self.cloud_tab.addTab(self._build_tab_keikaku(),   '経営計画')
         self.cloud_tab.addTab(self._build_tab_rinchi(),    '林地開発')
-        self.cloud_tab.addTab(self._build_tab_shinrinbo(), '森林簿')
 
         self.btn_mori_fullscreen = QPushButton('全画面')
         self.btn_mori_fullscreen.setCheckable(True)
@@ -226,6 +276,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.cloud_tab.currentChanged.connect(self._on_tab_changed)
 
         self._refresh_layer_combo()
+        self._schedule_layer_combo_refresh()
+        QTimer.singleShot(500, self._schedule_layer_combo_refresh)
         self._on_tab_changed(0)
         self._restore_state()
 
@@ -465,36 +517,67 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _restore_state(self):
         s = QSettings()
-        tab = s.value('fcloud_shizuoka/tab_index', 0, type=int)
+        tab = s.value('fcloud_shizuoka/tab_index', None, type=int)
+        order_version = s.value('fcloud_shizuoka/tab_order_version', 0, type=int)
+        if tab is None:
+            tab = 0
+        elif order_version < self._TAB_ORDER_VERSION:
+            tab = self._migrate_tab_index(tab)
+            s.setValue('fcloud_shizuoka/tab_index', tab)
+        s.setValue('fcloud_shizuoka/tab_order_version', self._TAB_ORDER_VERSION)
         if 0 <= tab < self.cloud_tab.count():
             self.cloud_tab.setCurrentIndex(tab)
+
+    @staticmethod
+    def _migrate_tab_index(tab):
+        old_to_new = {
+            0: 1,  # 保安林台帳
+            1: 2,  # 整備事業
+            2: 3,  # 森の力
+            3: 4,  # 経営計画
+            4: 5,  # 林地開発
+            5: 0,  # 森林簿
+        }
+        return old_to_new.get(tab, 0)
 
     def _on_tab_changed(self, index):
         prev = self._prev_tab_index
         needs_refresh = False
-        if prev == 2 and index != 2:
+        if prev == 0 and index != 0:
+            self._clear_selection_highlights()
+        elif prev == 3 and index != 3:
             self._clear_mori_markers()
             needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, False) or needs_refresh
-        elif prev == 3 and index != 3:
+        elif prev == 4 and index != 4:
             self._clear_selection_highlights()
             needs_refresh = self._set_layer_visible(self._keikaku_vector_layer_id, False) or needs_refresh
-        if index == 2 and prev != 2:
+        if index == 3 and prev != 3:
             if self.btn_mori_layer.isChecked():
                 needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, True) or needs_refresh
-        elif index == 3 and prev != 3:
+        elif index == 4 and prev != 4:
             self._update_keikaku_load_btn()
             needs_refresh = self._sync_keikaku_layer_visibility(
                 ensure_loaded=True) or needs_refresh
         self._prev_tab_index = index
         QSettings().setValue('fcloud_shizuoka/tab_index', index)
+        QSettings().setValue('fcloud_shizuoka/tab_order_version', self._TAB_ORDER_VERSION)
         if needs_refresh:
             self._refresh_map_canvas()
 
-        if index == 0:
+        if index == 0:  # 森林簿
+            if self._layer_type == 'gpkg':
+                self.lbl_cache_ts.setText('ローカルデータ')
+            elif self._current_shinrinbo_key:
+                db = self._get_db('森林簿')
+                ts = db.get_fetched_at(self._current_shinrinbo_key) if db else None
+                self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
+            else:
+                self.lbl_cache_ts.setText('取得日時: —')
+        elif index == 1:
             db = self._get_db('保安林台帳')
             ts = db.get_fetched_at('保安林/all') if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
-        elif index == 2:
+        elif index == 3:
             city = self.combo_hoanrin_city.currentText().strip()
             norin = _CITY_TO_NORIN.get(city, '')
             if norin:
@@ -507,11 +590,11 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 self.lbl_cache_ts.setText(f'レイヤーキャッシュ: {ts}')
             else:
                 self.lbl_cache_ts.setText('レイヤーキャッシュ: なし')
-        elif index == 3:
+        elif index == 4:
             db = self._get_db('経営計画')
             ts = db.get_fetched_at('経営計画/all') if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
-        elif index == 4:
+        elif index == 5:
             city = self.combo_hoanrin_city.currentText().strip()
             if city:
                 i = self.combo_rinchi_city.findData(city)
@@ -521,15 +604,6 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             db = self._get_db('林地開発')
             ts = db.get_fetched_at(self._RINCHI_ALL_CACHE_KEY) if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
-        elif index == 5:  # 森林簿
-            if self._layer_type == 'gpkg':
-                self.lbl_cache_ts.setText('ローカルデータ')
-            elif self._current_shinrinbo_key:
-                db = self._get_db('森林簿')
-                ts = db.get_fetched_at(self._current_shinrinbo_key) if db else None
-                self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
-            else:
-                self.lbl_cache_ts.setText('取得日時: —')
         else:
             self.lbl_cache_ts.setText('取得日時: —')
         self._update_cache_btn_states()
@@ -540,7 +614,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _save_current_cache(self):
         tab = self.cloud_tab.currentIndex()
-        if tab == 0:
+        if tab == 1:
             if self._current_raw_hoanrin is None:
                 return
             db = self._get_db('保安林台帳')
@@ -548,7 +622,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 return
             ts = db.put('保安林/all', self._current_raw_hoanrin)
             self.lbl_cache_ts.setText(f'取得日時: {ts}')
-        elif tab == 2:
+        elif tab == 3:
             if self._current_raw_mori is None or not self._current_mori_cache_key:
                 return
             db = self._get_db('森の力')
@@ -556,7 +630,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 return
             ts = db.put(self._current_mori_cache_key, self._current_raw_mori)
             self.lbl_cache_ts.setText(f'取得日時: {ts}')
-        elif tab == 4:
+        elif tab == 5:
             if self._current_raw_rinchi is None or not self._current_rinchi_cache_key:
                 return
             ts = self._save_rinchi_cache_to_db()
@@ -570,15 +644,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         unsaved = '未保存' in ts
         tab = self.cloud_tab.currentIndex()
 
-        if tab == 3:
+        if tab == 4:
             # 経営計画: APIから取得すると同時にGPKGへ自動保存 → ローカル保存は常に無効
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(not no_data)
-        elif tab == 1:
+        elif tab == 2:
             # 整備事業: 未実装
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
-        elif tab == 5:
+        elif tab == 0:
             # 森林簿: 自動保存のためローカル保存不要。更新はAPIレイヤー選択時のみ有効
             self.btn_cache_save.setEnabled(False)
             can_update = (self._layer_type != 'gpkg'
@@ -592,7 +666,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _update_current_cache(self):
         tab = self.cloud_tab.currentIndex()
-        if tab == 0:
+        if tab == 1:
             self.btn_cache_update.setEnabled(False)
             self.btn_hoanrin_search.setEnabled(False)
             self.lbl_cache_ts.setText('取得日時: 更新中...')
@@ -601,7 +675,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 {},
                 self._on_hoanrin_update_result,
             )
-        elif tab == 2:
+        elif tab == 3:
             gpkg = self._get_mori_gpkg_path()
             if gpkg and os.path.exists(gpkg):
                 try:
@@ -611,17 +685,17 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             self._remove_mori_vector_layer()
             self.btn_mori_layer.setChecked(True)
             self._on_mori_layer_toggled(True)
-        elif tab == 3:
+        elif tab == 4:
             # GPKGは他地域のデータを保持するため削除せず、地域単位で上書きする
             self._remove_keikaku_vector_layer()
             self._keikaku_cd_to_name.clear()
             self.lbl_cache_ts.setText('取得日時: 更新中...')
             self._load_keikaku(force=True)
-        elif tab == 4:
+        elif tab == 5:
             self._invalidate_rinchi_layer_cache()
             self.lbl_cache_ts.setText('取得日時: 更新中...')
             self._search_rinchi(force=True, save_to_db=True)
-        elif tab == 5:
+        elif tab == 0:
             if self._layer_type != 'gpkg' and self._shinrinbo_api_ids:
                 self._update_shinrinbo_cache()
 
@@ -632,6 +706,29 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
     def _connect_project_signals(self):
         QgsProject.instance().layersAdded.connect(self._refresh_layer_combo)
         QgsProject.instance().layersRemoved.connect(self._refresh_layer_combo)
+        QgsProject.instance().readProject.connect(self._on_project_read)
+        self.iface.currentLayerChanged.connect(self._refresh_layer_combo)
+
+    def _on_project_read(self, *_):
+        self._schedule_layer_combo_refresh()
+        QTimer.singleShot(300, self._schedule_layer_combo_refresh)
+
+    def _schedule_layer_combo_refresh(self, delay_ms=0):
+        self._layer_refresh_timer.start(max(0, int(delay_ms)))
+
+    def _iter_selectable_layers(self):
+        seen = set()
+        root = QgsProject.instance().layerTreeRoot()
+        for node in root.findLayers():
+            layer = node.layer()
+            if layer is None:
+                continue
+            seen.add(layer.id())
+            yield layer
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer is None or layer.id() in seen:
+                continue
+            yield layer
 
     def _refresh_layer_combo(self, *_):
         settings = QSettings()
@@ -642,10 +739,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                       or settings.value('fcloud_shizuoka/layer_id', ''))
         self.layer_combo.blockSignals(True)
         self.layer_combo.clear()
-        # レイヤーパネルの並び順で追加
-        root = QgsProject.instance().layerTreeRoot()
-        for node in root.findLayers():
-            layer = node.layer()
+        # レイヤーパネルの並び順を優先しつつ、起動直後は mapLayers() も補助的に使う
+        for layer in self._iter_selectable_layers():
             if not isinstance(layer, QgsVectorLayer):
                 continue
             if layer.name().startswith('fcloud_'):
@@ -674,6 +769,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _on_layer_changed(self):
         self._last_combo_id = self.layer_combo.currentData()
+        self._restore_selection_color()
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
             try:
                 self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
@@ -701,6 +797,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 self._connected_layer = layer
                 self.iface.setActiveLayer(layer)
                 layer.selectionChanged.connect(self._on_selection_changed)
+                self._apply_selection_color(layer)
                 flds = [f.name() for f in layer.fields()]
                 src = layer.source().lower()
                 if '市町村名称' in flds:
@@ -712,6 +809,46 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 self._init_shinrinbo_headers()
                 self._refresh_city_combo(layer)
         self._update_keikaku_load_btn()
+
+    # ------------------------------------------------------------------
+    # 連携レイヤーの選択ハイライト（塗り20%に変更・復元）
+    # ------------------------------------------------------------------
+
+    def _apply_selection_color(self, layer):
+        # selectionProperties() は QGIS 3.30+ で追加されたAPI（本プラグインの
+        # qgisMinimumVersion=3.14 環境では存在しない場合があるため未対応時はスキップ）
+        if not hasattr(layer, 'selectionProperties'):
+            return
+        from qgis.core import Qgis
+        sp = layer.selectionProperties()
+        self._sel_color_layer_id = layer.id()
+        self._sel_color_orig = QColor(sp.selectionColor())  # invalidな場合はコピーもinvalid
+        self._sel_mode_orig = sp.selectionRenderingMode()
+
+        base = sp.selectionColor()
+        if not base.isValid():
+            base = QgsProject.instance().selectionColor()
+        faded = QColor(base)
+        faded.setAlphaF(0.2)
+        sp.setSelectionColor(faded)
+        # selectionColor は selectionRenderingMode が CustomColor でないと反映されない
+        sp.setSelectionRenderingMode(Qgis.SelectionRenderingMode.CustomColor)
+        layer.triggerRepaint()
+        self.iface.mapCanvas().refresh()
+
+    def _restore_selection_color(self):
+        if not self._sel_color_layer_id:
+            return
+        layer = QgsProject.instance().mapLayer(self._sel_color_layer_id)
+        if layer and not sip.isdeleted(layer) and hasattr(layer, 'selectionProperties'):
+            sp = layer.selectionProperties()
+            sp.setSelectionColor(self._sel_color_orig or QColor())
+            sp.setSelectionRenderingMode(self._sel_mode_orig)
+            layer.triggerRepaint()
+            self.iface.mapCanvas().refresh()
+        self._sel_color_layer_id = None
+        self._sel_color_orig = None
+        self._sel_mode_orig = None
 
     def _refresh_city_combo(self, layer):
         from .constants import _CITY_API_MAP, _API_CITY_MAP, _CD_CITY
@@ -951,7 +1088,14 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
     # アンロード / クローズ
     # ------------------------------------------------------------------
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if (self._connected_layer is not None and not sip.isdeleted(self._connected_layer)
+                and self._sel_color_layer_id is None):
+            self._apply_selection_color(self._connected_layer)
+
     def closeEvent(self, event):
+        self._restore_selection_color()
         self._clear_hoanrin_highlights()
         self._clear_selection_highlights()
         self._clear_mori_markers()
@@ -964,6 +1108,15 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         super().closeEvent(event)
 
     def cleanup_on_unload(self):
+        try:
+            QgsProject.instance().readProject.disconnect(self._on_project_read)
+        except Exception:
+            pass
+        try:
+            self.iface.currentLayerChanged.disconnect(self._refresh_layer_combo)
+        except Exception:
+            pass
+        self._restore_selection_color()
         self._clear_hoanrin_highlights()
         self._clear_selection_highlights()
         self._clear_mori_markers()

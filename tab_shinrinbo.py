@@ -4,8 +4,8 @@ import sip
 import struct
 
 from qgis.PyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QFrame, QPushButton,
 )
 from qgis.PyQt.QtCore import Qt, QObject, QEvent
 from qgis.core import (
@@ -89,7 +89,16 @@ class ShinrinboMixin:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 4, 0, 0)
-        v.setSpacing(0)
+        v.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_kozu_shinrinbo = QPushButton('公図連携OFF')
+        self.btn_kozu_shinrinbo.setCheckable(True)
+        self.btn_kozu_shinrinbo.setToolTip('ONにすると小班選択のたびに自動でkozu_xml_integratorへ送信')
+        row.addWidget(self.btn_kozu_shinrinbo)
+        self._update_kozu_btn(self.btn_kozu_shinrinbo)
+        v.addLayout(row)
 
         self.tbl_shinrinbo = QTableWidget(0, 0)
         self.tbl_shinrinbo.setSelectionBehavior(QTableWidget.SelectRows)
@@ -109,6 +118,10 @@ class ShinrinboMixin:
         )
 
         v.addWidget(self.tbl_shinrinbo, 1)
+
+        self.btn_kozu_shinrinbo.toggled.connect(
+            lambda checked: self._on_kozu_toggled(checked, self.btn_kozu_shinrinbo))
+        self.tbl_shinrinbo.itemSelectionChanged.connect(self._on_shinrinbo_row_selected)
         return w
 
     # ------------------------------------------------------------------
@@ -156,13 +169,17 @@ class ShinrinboMixin:
     # ------------------------------------------------------------------
 
     def _refresh_shinrinbo_tab(self, features):
+        self._update_kozu_btn(self.btn_kozu_shinrinbo)
         self._current_shinrinbo_key = ''
         self._shinrinbo_api_ids = []
+        self._shinrinbo_row_features = list(features or [])
         self._shinrinbo_generation = getattr(self, '_shinrinbo_generation', 0) + 1
         gen = self._shinrinbo_generation
 
         if not features:
             self.tbl_shinrinbo.setRowCount(0)
+            self._clear_selection_highlights()
+            self._clear_cloud_record_info()
             self._update_cache_btn_states()
             return
 
@@ -468,7 +485,11 @@ class ShinrinboMixin:
                         val = str(v)
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setData(Qt.UserRole, feat)
                 self.tbl_shinrinbo.setItem(row, col, item)
+
+        if features:
+            self.tbl_shinrinbo.selectRow(0)
 
     def _build_shinrinbo_table_api(self, results):
         col_map = getattr(self, '_shinrinbo_col_map', [])
@@ -482,7 +503,65 @@ class ShinrinboMixin:
                     text = ''
                 item = QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setData(Qt.UserRole, d)
                 self.tbl_shinrinbo.setItem(row, col, item)
+
+        if results:
+            self.tbl_shinrinbo.selectRow(0)
+
+    # ------------------------------------------------------------------
+    # 行選択 → kozu連携
+    # ------------------------------------------------------------------
+
+    def _on_shinrinbo_row_selected(self):
+        self._clear_selection_highlights()
+        rows = self.tbl_shinrinbo.selectionModel().selectedRows()
+        if not rows:
+            self._clear_cloud_record_info()
+            return
+        row = rows[0].row()
+        item = self.tbl_shinrinbo.item(row, 0)
+        if not item:
+            self._clear_cloud_record_info()
+            return
+        self._show_cloud_table_row_info('森林簿', self.tbl_shinrinbo, row)
+        row_data = item.data(Qt.UserRole)
+        if row_data is None:
+            return
+
+        feature = None
+        row_features = getattr(self, '_shinrinbo_row_features', [])
+        if 0 <= row < len(row_features):
+            feature = row_features[row]
+        if feature is not None:
+            try:
+                geom = feature.geometry()
+            except Exception:
+                geom = None
+            layer = self._connected_layer
+            if geom and not geom.isEmpty() and layer is not None and not sip.isdeleted(layer):
+                self._add_selection_highlight(geom, layer.crs())
+                self._refresh_map_canvas()
+
+        if not self.btn_kozu_shinrinbo.isChecked():
+            return
+
+        if self._layer_type == 'gpkg':
+            feat = row_data
+            fnames = feat.fields().names()
+            daiji = str(feat['大字名称']  or '').strip() if '大字名称'  in fnames else ''
+            oban  = str(feat['地番_親番'] or '').strip() if '地番_親番' in fnames else ''
+            eda   = str(feat['地番_枝番'] or '').strip() if '地番_枝番' in fnames else ''
+            # 親番・枝番は別フィールドのため、kozu側のchiban形式（親番-枝番）に合わせて結合
+            chiban = f'{oban}-{eda}' if eda and eda != '0' else oban
+        else:
+            d = row_data or {}
+            daiji = str(d.get('大字', '') or '').strip()
+            # 表示用_地番は既に「親番-枝番」形式で提供されるためそのまま使用
+            chiban = str(d.get('表示用_地番', '') or '').strip()
+
+        if chiban:
+            self._send_to_kozu(daiji, chiban)
 
     # ------------------------------------------------------------------
     # ヘルパー
