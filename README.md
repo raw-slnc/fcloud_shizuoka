@@ -61,7 +61,7 @@ This plugin is currently intended for **independent ZIP distribution** and is no
 
 Cached data is stored under the project directory in an `fcloud_shizuoka/` folder.
 
-- **保安林台帳**: SQLite cache for full dataset plus Oaza list cache
+- **保安林台帳**: SQLite cache by municipality plus Oaza list cache
 - **森の力**: SQLite cache by search condition, plus polygon cache
 - **経営計画**: SQLite cache plus GeoPackage cache
 - **林地開発**: SQLite cache by search condition

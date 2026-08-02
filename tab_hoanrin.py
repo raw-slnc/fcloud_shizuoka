@@ -100,6 +100,66 @@ class HoanrinMixin:
     # 大字コンボ更新
     # ------------------------------------------------------------------
 
+    def _hoanrin_api_city(self, city=None):
+        city = (city if city is not None else self.combo_hoanrin_city.currentText()).strip()
+        return _CITY_API_MAP.get(city, city)
+
+    def _hoanrin_city_cache_key(self, city=None):
+        api_city = self._hoanrin_api_city(city)
+        return f'保安林/city/{api_city}' if api_city else ''
+
+    def _filter_hoanrin_data_by_city(self, data, city=None):
+        api_city = self._hoanrin_api_city(city)
+        if data is None or not api_city:
+            return data
+        return [
+            r for r in self._extract_records(data)
+            if isinstance(r, dict) and r.get('市町村') == api_city
+        ]
+
+    def _hoanrin_scope_cities(self):
+        combo = getattr(self, 'combo_hoanrin_city', None)
+        cities = []
+        seen = set()
+        if combo is not None:
+            for i in range(combo.count()):
+                city = combo.itemText(i).strip()
+                if city and city not in seen:
+                    cities.append(city)
+                    seen.add(city)
+        current = combo.currentText().strip() if combo is not None else ''
+        if current and current not in seen:
+            cities.append(current)
+        return cities
+
+    def _hoanrin_cache_status_text(self, cities=None):
+        db = self._get_db('保安林台帳')
+        if db is None:
+            return '取得日時: —'
+        cities = cities or [self.combo_hoanrin_city.currentText().strip()]
+        cities = [c for c in cities if c]
+        if not cities:
+            return '取得日時: —'
+        timestamps = []
+        for city in cities:
+            key = self._hoanrin_city_cache_key(city)
+            if not key:
+                continue
+            ts = db.get_fetched_at(key)
+            if ts:
+                timestamps.append(ts)
+        if not timestamps:
+            return '取得日時: —'
+        if len(cities) == 1:
+            return f'取得日時: {timestamps[0]}'
+        if len(timestamps) < len(cities):
+            return f'取得日時: 一部保存 {len(timestamps)}/{len(cities)}市町村'
+        oldest = min(timestamps)
+        newest = max(timestamps)
+        if oldest == newest:
+            return f'取得日時: {newest}（{len(cities)}市町村）'
+        return f'取得日時: {oldest}〜{newest}（{len(cities)}市町村）'
+
     def _on_hoanrin_city_changed(self, city):
         self.combo_hoanrin_daiji.blockSignals(True)
         self.combo_hoanrin_daiji.clear()
@@ -160,10 +220,16 @@ class HoanrinMixin:
 
         db = self._get_db('保安林台帳')
         if db is not None:
-            cached, ts = db.get('保安林/all')
+            cached, ts = db.get(self._hoanrin_city_cache_key(city))
             if cached is not None:
                 self._current_raw_hoanrin = cached
                 self.lbl_cache_ts.setText(f'取得日時: {ts}')
+                self._filter_and_display_hoanrin()
+                return
+            legacy_cached, legacy_ts = db.get('保安林/all')
+            if legacy_cached is not None:
+                self._current_raw_hoanrin = self._filter_hoanrin_data_by_city(legacy_cached, city)
+                self.lbl_cache_ts.setText(f'取得日時: 未保存（旧全体: {legacy_ts}）')
                 self._filter_and_display_hoanrin()
                 return
 
@@ -171,30 +237,65 @@ class HoanrinMixin:
         self._post_api(
             f'{_API_BASE}/advanced-search/保安林検索',
             {},
-            self._on_hoanrin_result,
+            lambda data, city=city: self._on_hoanrin_result(data, city),
         )
 
-    def _on_hoanrin_result(self, data):
+    def _on_hoanrin_result(self, data, city=None):
         self.btn_hoanrin_search.setEnabled(True)
-        self._current_raw_hoanrin = data
+        self._current_raw_hoanrin = self._filter_hoanrin_data_by_city(data, city)
         self.lbl_cache_ts.setText('取得日時: 未保存')
         self._filter_and_display_hoanrin()
         self._update_cache_btn_states()
 
-    def _on_hoanrin_update_result(self, data):
-        self.btn_hoanrin_search.setEnabled(True)
-        self.btn_cache_update.setEnabled(True)
-        if data is None:
-            self.lbl_cache_ts.setText('取得日時: 取得失敗')
-            return
-        self._current_raw_hoanrin = data
+    def _save_hoanrin_city_cache(self, city, data):
         db = self._get_db('保安林台帳')
-        if db is not None:
-            ts = db.put('保安林/all', data)
-            self.lbl_cache_ts.setText(f'取得日時: {ts}')
+        key = self._hoanrin_city_cache_key(city)
+        if db is None or not key:
+            return None
+        return db.put(key, self._filter_hoanrin_data_by_city(data, city))
+
+    def _update_hoanrin_scope_cache(self):
+        cities = self._hoanrin_scope_cities()
+        if not cities:
+            return
+        self._hoanrin_update_generation = getattr(self, '_hoanrin_update_generation', 0) + 1
+        gen = self._hoanrin_update_generation
+        self._hoanrin_update_total = len(cities)
+        self._hoanrin_update_failed = 0
+        self.btn_cache_update.setEnabled(False)
+        self.btn_hoanrin_search.setEnabled(False)
+        self.lbl_cache_ts.setText(f'取得日時: 更新中...（{len(cities)}市町村）')
+        self._post_api(
+            f'{_API_BASE}/advanced-search/保安林検索',
+            {},
+            lambda data, cities=cities, gen=gen: self._on_hoanrin_scope_update_result(cities, data, gen),
+        )
+
+    def _on_hoanrin_scope_update_result(self, cities, data, gen):
+        if gen != getattr(self, '_hoanrin_update_generation', 0):
+            return
+        if data is None:
+            self._hoanrin_update_failed = len(cities)
         else:
-            self.lbl_cache_ts.setText('取得日時: 未保存')
-        self._filter_and_display_hoanrin()
+            for city in cities:
+                if self._save_hoanrin_city_cache(city, data) is None:
+                    self._hoanrin_update_failed += 1
+
+        self.btn_hoanrin_search.setEnabled(True)
+        current_city = self.combo_hoanrin_city.currentText().strip()
+        db = self._get_db('保安林台帳')
+        if db is not None and current_city:
+            cached, _ = db.get(self._hoanrin_city_cache_key(current_city))
+            if cached is not None:
+                self._current_raw_hoanrin = cached
+                self._filter_and_display_hoanrin()
+        if self._hoanrin_update_failed == self._hoanrin_update_total:
+            self.lbl_cache_ts.setText('取得日時: 取得失敗')
+        else:
+            text = self._hoanrin_cache_status_text(self._hoanrin_scope_cities())
+            if self._hoanrin_update_failed:
+                text += f'（{self._hoanrin_update_failed}市町村失敗）'
+            self.lbl_cache_ts.setText(text)
         self._update_cache_btn_states()
 
     def _filter_and_display_hoanrin(self):

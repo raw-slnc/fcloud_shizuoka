@@ -90,9 +90,9 @@ class MoriMixin:
         v.addLayout(bottom)
 
         self.btn_mori_search.clicked.connect(self._search_mori)
-        self.combo_mori_norin.activated.connect(self._on_mori_search_filter_changed)
-        self.combo_mori_nendo.activated.connect(self._on_mori_search_filter_changed)
-        self.combo_mori_kubun.activated.connect(self._on_mori_search_filter_changed)
+        self.combo_mori_norin.activated.connect(self._on_mori_condition_changed)
+        self.combo_mori_nendo.activated.connect(self._on_mori_condition_changed)
+        self.combo_mori_kubun.activated.connect(self._on_mori_condition_changed)
         self.btn_mori_layer.toggled.connect(self._on_mori_layer_toggled)
         self.combo_mori_seibi.currentIndexChanged.connect(self._on_mori_seibi_changed)
         self.tbl_mori.itemSelectionChanged.connect(self._on_mori_selected)
@@ -117,6 +117,11 @@ class MoriMixin:
         if kubun:
             params['事業区分'] = kubun
 
+        self._current_mori_filter = {
+            '農林事務所': norin,
+            '年度': nendo,
+            '事業区分': kubun or '',
+        }
         self._current_mori_cache_key = (
             f'森の力/農林={norin}&年度={nendo or ""}&区分={kubun or ""}')
 
@@ -149,8 +154,11 @@ class MoriMixin:
         self._auto_show_mori_layer(total)
         self._update_cache_btn_states()
 
-    def _on_mori_search_filter_changed(self, *_):
-        self._search_mori()
+    def _on_mori_condition_changed(self, *_):
+        self.lbl_mori_count.setText('条件変更後は検索を押してください')
+        self.lbl_cache_ts.setText('取得日時: —')
+        self.btn_cache_save.setEnabled(False)
+        self.btn_cache_update.setEnabled(False)
 
     def _display_mori_table(self, data):
         records = self._extract_records(data)
@@ -177,6 +185,12 @@ class MoriMixin:
             records = [r for r in records
                        if isinstance(r, dict)
                        and str(r.get('申請者_整備者_氏名', '') or '') == seibi_filter]
+
+        self._current_mori_display_kanri = [
+            str(r.get('管理番号', '') or '').strip()
+            for r in records
+            if isinstance(r, dict) and str(r.get('管理番号', '') or '').strip()
+        ]
 
         total = len(records)
         self.tbl_mori.setRowCount(total)
@@ -217,8 +231,7 @@ class MoriMixin:
         if not self.btn_mori_layer.isChecked():
             self.btn_mori_layer.setChecked(True)
             return
-        if not self._mori_vector_layer_id:
-            self._on_mori_layer_toggled(True)
+        self._on_mori_layer_toggled(True)
 
     def _on_mori_seibi_changed(self):
         if self._current_raw_mori is not None:
@@ -238,20 +251,18 @@ class MoriMixin:
         field_names = {f.name() for f in layer.fields()}
         clauses = []
 
-        norin = self.combo_mori_norin.currentText().strip()
-        nendo = self.combo_mori_nendo.currentData()
-        kubun = self.combo_mori_kubun.currentData() or ''
-        seibi = self.combo_mori_seibi.currentData() or ''
+        kanri_values = list(dict.fromkeys(
+            getattr(self, '_current_mori_display_kanri', []) or []
+        ))
+        if '管理番号' in field_names and kanri_values:
+            quoted = ','.join(
+                f"'{self._escape_mori_sql(value)}'" for value in kanri_values
+            )
+            clauses.append(f'"管理番号" IN ({quoted})')
+        elif '管理番号' in field_names:
+            clauses.append('"管理番号" IS NULL AND "管理番号" IS NOT NULL')
 
-        if norin and '農林事務所' in field_names:
-            clauses.append(f'"農林事務所" = \'{self._escape_mori_sql(norin)}\'')
-        if nendo is not None and '年度' in field_names:
-            clauses.append(f'"年度" = \'{self._escape_mori_sql(nendo)}\'')
-        if kubun and '事業区分' in field_names:
-            clauses.append(f'"事業区分" = \'{self._escape_mori_sql(kubun)}\'')
-        if seibi and '整備者名' in field_names:
-            clauses.append(f'"整備者名" = \'{self._escape_mori_sql(seibi)}\'')
-
+        self._apply_mori_style(layer)
         layer.setSubsetString(' AND '.join(clauses))
         self._refresh_map_canvas()
 
@@ -275,8 +286,17 @@ class MoriMixin:
             self.btn_mori_layer.blockSignals(False)
             return
         if self._mori_vector_layer_id:
-            self._set_layer_visible(self._mori_vector_layer_id, True)
-            self._refresh_map_canvas()
+            layer = QgsProject.instance().mapLayer(self._mori_vector_layer_id)
+            if layer is not None and layer.featureCount() == 0:
+                remove_project_layer(QgsProject.instance(), self._mori_vector_layer_id)
+                layer = None
+                self._mori_vector_layer_id = None
+            if layer is not None and self._set_layer_visible(self._mori_vector_layer_id, True):
+                self._apply_mori_layer_filter()
+                self._refresh_map_canvas()
+                return
+            self._mori_vector_layer_id = None
+        if self._mori_loading:
             return
         gpkg = self._get_mori_gpkg_path()
         if gpkg and os.path.exists(gpkg):
@@ -294,14 +314,20 @@ class MoriMixin:
         if layer.fields().indexOf('整備者名') < 0:
             self._start_mori_mvt_fetch()
             return
+        if layer.featureCount() == 0:
+            self._start_mori_mvt_fetch()
+            return
         self._apply_mori_style(layer)
         visible = (self.btn_mori_layer.isChecked()
-                   and self.cloud_tab.currentIndex() == 2)
+                   and self.cloud_tab.currentIndex() == 3)
         self._add_layer_above_gpkg(layer, visible=visible)
         self._mori_vector_layer_id = layer.id()
         self._apply_mori_layer_filter()
 
     def _start_mori_mvt_fetch(self):
+        if self._mori_loading:
+            return
+        self._mori_loading = True
         from .mvt_loader import shizuoka_tiles
         self._mori_layer_features = []
         tiles = shizuoka_tiles(zoom=_MORI_MVT_ZOOM)
@@ -321,6 +347,11 @@ class MoriMixin:
 
     def _on_mori_mvt_tile(self, reply, tile_x, tile_y):
         from .mvt_loader import parse_tile
+        if not self._mori_loading:
+            if reply in self._pending_replies:
+                self._pending_replies.remove(reply)
+            reply.deleteLater()
+            return
         if reply.error() == QNetworkReply.NoError:
             raw = bytes(reply.readAll())
             try:
@@ -338,6 +369,7 @@ class MoriMixin:
             self._build_mori_vector_layer()
 
     def _build_mori_vector_layer(self):
+        self._mori_loading = False
         layer = QgsVectorLayer('Polygon?crs=EPSG:4326', 'fcloud_森の力実施箇所', 'memory')
         pr = layer.dataProvider()
         pr.addAttributes([
@@ -373,29 +405,14 @@ class MoriMixin:
             if qf:
                 feats_to_add.append(qf)
 
-        pr.addFeatures(feats_to_add)
-        layer.updateExtents()
-
-        # タイル境界クリッピングで分割されたポリゴンを管理番号単位でdissolve
-        self.lbl_mori_count.setText('ポリゴン統合中...')
-        try:
-            import processing
-            from qgis.core import QgsProcessingContext, QgsProcessingFeedback
-            ctx = QgsProcessingContext()
-            result = processing.run('native:dissolve', {
-                'INPUT': layer,
-                'FIELD': ['管理番号'],
-                'OUTPUT': 'memory:',
-            }, context=ctx, feedback=QgsProcessingFeedback())
-            save_layer = result['OUTPUT']
-        except Exception as e:
-            print(f'[fcloud] mori dissolve failed, using raw layer: {e}')
-            save_layer = layer
-
+        save_layer = self._dissolve_mori_features_by_kanri(layer, feats_to_add)
+        save_layer.setName('fcloud_森の力実施箇所')
         self._apply_mori_style(save_layer)
 
         gpkg = self._get_mori_gpkg_path()
-        if gpkg:
+        if gpkg and not feats_to_add:
+            print('[fcloud] 森の力MVT: 0件取得のためGPKGキャッシュへの保存をスキップしました（タイル取得に失敗した可能性があります）')
+        elif gpkg:
             os.makedirs(os.path.dirname(gpkg), exist_ok=True)
             opts = QgsVectorFileWriter.SaveVectorOptions()
             opts.driverName = 'GPKG'
@@ -411,13 +428,62 @@ class MoriMixin:
                 self.lbl_cache_ts.setText(f'レイヤーキャッシュ: {ts}')
 
         visible = (self.btn_mori_layer.isChecked()
-                   and self.cloud_tab.currentIndex() == 2)
+                   and self.cloud_tab.currentIndex() == 3)
         self._add_layer_above_gpkg(save_layer, visible=visible)
         self._mori_vector_layer_id = save_layer.id()
         self._apply_mori_layer_filter()
         self.btn_mori_layer.setEnabled(True)
         total = self.tbl_mori.rowCount()
         self.lbl_mori_count.setText(f'{total}件' if total else '')
+
+    def _dissolve_mori_features_by_kanri(self, template_layer, features):
+        # Processing の一時出力を使わず、管理番号単位で統合して名前付きメモリレイヤーを作る。
+        self.lbl_mori_count.setText('ポリゴン統合中...')
+        layer = QgsVectorLayer('Polygon?crs=EPSG:4326', 'fcloud_森の力実施箇所', 'memory')
+        pr = layer.dataProvider()
+        pr.addAttributes(template_layer.fields())
+        layer.updateFields()
+
+        groups = {}
+        order = []
+        for feat in features:
+            attrs = feat.attributes()
+            kanri = str(attrs[0] if attrs else '').strip()
+            if not kanri:
+                kanri = f'__empty_{len(order)}'
+            if kanri not in groups:
+                groups[kanri] = {'attrs': attrs, 'geoms': []}
+                order.append(kanri)
+            geom = feat.geometry()
+            if geom and not geom.isEmpty():
+                groups[kanri]['geoms'].append(QgsGeometry(geom))
+
+        out_features = []
+        for kanri in order:
+            item = groups[kanri]
+            geoms = item['geoms']
+            if not geoms:
+                continue
+            try:
+                geom = QgsGeometry.unaryUnion(geoms)
+            except Exception as e:
+                print(f'[fcloud] mori unaryUnion failed for {kanri}: {e}')
+                geom = geoms[0]
+                for extra in geoms[1:]:
+                    try:
+                        geom = geom.combine(extra)
+                    except Exception:
+                        pass
+            if not geom or geom.isEmpty():
+                continue
+            qf = QgsFeature(layer.fields())
+            qf.setGeometry(geom)
+            qf.setAttributes(item['attrs'])
+            out_features.append(qf)
+
+        pr.addFeatures(out_features)
+        layer.updateExtents()
+        return layer
 
     def _apply_mori_style(self, layer):
         from collections import defaultdict
@@ -498,6 +564,7 @@ class MoriMixin:
         self._mori_layer_features = []
         self._mori_tiles_pending = 0
         self._mori_tiles_received = 0
+        self._mori_loading = False
         self._refresh_map_canvas()
 
     def _clear_mori_markers(self):

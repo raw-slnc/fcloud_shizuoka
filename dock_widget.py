@@ -55,12 +55,18 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._mori_markers           = []
         self._pending_replies        = []
         self._current_raw_hoanrin    = None
+        self._hoanrin_update_generation = 0
+        self._hoanrin_update_total   = 0
+        self._hoanrin_update_failed  = 0
         self._current_raw_mori       = None
         self._current_mori_cache_key = ''
+        self._current_mori_filter    = {}
+        self._current_mori_display_kanri = []
         self._mori_vector_layer_id   = None
         self._mori_layer_features    = []
         self._mori_tiles_pending     = 0
         self._mori_tiles_received    = 0
+        self._mori_loading           = False
         self._current_raw_keikaku    = None
         self._keikaku_vector_layer_id = None
         self._keikaku_layer_features  = []
@@ -576,9 +582,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             else:
                 self.lbl_cache_ts.setText('取得日時: —')
         elif index == 1:
-            db = self._get_db('保安林台帳')
-            ts = db.get_fetched_at('保安林/all') if db else None
-            self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
+            self.lbl_cache_ts.setText(
+                self._hoanrin_cache_status_text(self._hoanrin_scope_cities())
+            )
         elif index == 3:
             city = self.combo_hoanrin_city.currentText().strip()
             norin = _CITY_TO_NORIN.get(city, '')
@@ -619,10 +625,12 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         if tab == 1:
             if self._current_raw_hoanrin is None:
                 return
-            db = self._get_db('保安林台帳')
-            if db is None:
+            city = self.combo_hoanrin_city.currentText().strip()
+            if not city:
                 return
-            ts = db.put('保安林/all', self._current_raw_hoanrin)
+            ts = self._save_hoanrin_city_cache(city, self._current_raw_hoanrin)
+            if ts is None:
+                return
             self.lbl_cache_ts.setText(f'取得日時: {ts}')
         elif tab == 3:
             if self._current_raw_mori is None or not self._current_mori_cache_key:
@@ -661,22 +669,23 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                           and bool(self._current_shinrinbo_key)
                           and not no_data)
             self.btn_cache_update.setEnabled(can_update)
+        elif tab == 1:
+            # 保安林: 連携GPKGに含まれる市町村範囲をまとめて取得・更新できる。
+            updating = '更新中' in ts
+            can_update = (not updating
+                          and self._get_db('保安林台帳') is not None
+                          and bool(self._hoanrin_scope_cities()))
+            self.btn_cache_save.setEnabled(unsaved and not updating)
+            self.btn_cache_update.setEnabled(can_update)
         else:
-            # 保安林・森の力・林地開発: 未保存なら保存可、保存済みなら更新可
+            # 森の力・林地開発: 未保存なら保存可、保存済みなら更新可
             self.btn_cache_save.setEnabled(unsaved)
             self.btn_cache_update.setEnabled(not unsaved and not no_data)
 
     def _update_current_cache(self):
         tab = self.cloud_tab.currentIndex()
         if tab == 1:
-            self.btn_cache_update.setEnabled(False)
-            self.btn_hoanrin_search.setEnabled(False)
-            self.lbl_cache_ts.setText('取得日時: 更新中...')
-            self._post_api(
-                f'{_API_BASE}/advanced-search/保安林検索',
-                {},
-                self._on_hoanrin_update_result,
-            )
+            self._update_hoanrin_scope_cache()
         elif tab == 3:
             gpkg = self._get_mori_gpkg_path()
             if gpkg and os.path.exists(gpkg):
