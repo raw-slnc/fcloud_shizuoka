@@ -384,7 +384,8 @@
     <div class="card">
       <h4>対象データ</h4>
       <ul>
-        <li>静岡県内の森林簿 GeoPackage（静岡県のみ対応）</li>
+        <li>静岡県内の森林簿 GeoPackage</li>
+        <li>静岡県配布の森林計画図SHP</li>
         <li>静岡県森林クラウド公開API</li>
         <li>MVT（Mapbox Vector Tiles）形式の地理データ</li>
       </ul>
@@ -397,14 +398,15 @@
     QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
   </p>
 
-  <p style="margin-top:1em;font-size:13px;color:#555;line-height:1.7;">
-    ※ 静岡県が配布する森林計画図SHPファイル（KEY1フィールドを含むもの）も
-    接続レイヤーとして利用できます。ただし、SHPには森林簿属性が含まれないため、
-    小班情報パネルの表示と保安林台帳の地番照合・ハイライト機能は動作しません。
-    森の力・経営計画・林地開発のAPI検索およびレイヤー表示は利用可能です。
-    完全な機能を利用するには、Shinrinbo Code Converter で作成した
+  <div class="tip">
+    静岡県が配布する森林計画図SHPファイル（KEY1フィールドを含むもの）も
+    接続レイヤーとして利用できます。SHPには森林簿属性（材積・林齢など）が含まれないため、
+    小班情報パネルの表示は動作しませんが、市町村名称・地番の各フィールドが含まれていれば
+    保安林台帳の地番照合・ハイライト機能は利用できます。
+    森の力・経営計画・林地開発のAPI検索およびレイヤー表示も利用可能です。
+    完全な機能（小班情報パネル含む）を利用するには、Shinrinbo Code Converter で作成した
     GeoPackage（GPKG）の使用を推奨します。
-  </p>
+  </div>
 
   <!-- ── 動作要件 ── -->
   <span class="section-anchor" id="requirements"></span>
@@ -414,7 +416,7 @@
     <tr><td>QGIS バージョン</td><td>3.14 以上</td></tr>
     <tr><td>動作確認環境</td><td>QGIS 3.40.10（Windows・Linux）</td></tr>
     <tr><td>インターネット接続</td><td>必須（API・MVTタイルへのアクセス）</td></tr>
-    <tr><td>GeoPackage</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ</td></tr>
+    <tr><td>GeoPackageまたはShapefile</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ<br>または静岡県配布の森林計画図SHPファイル</td></tr>
     <tr><td>対象地域</td><td>静岡県内のみ</td></tr>
   </table>
 
@@ -422,9 +424,13 @@
   <span class="section-anchor" id="install"></span>
   <h2>インストール</h2>
 
-  <div class="warn">
-    v0.1.0 はテスト版です。QGIS 公式リポジトリには未登録のため、ZIP ファイルから手動でインストールします。
-  </div>
+  <h3>QGIS公式リポジトリからのインストール手順（推奨）</h3>
+  <ol>
+    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
+    <li>「すべて」タブで <strong>Fcloud Shizuoka</strong> を検索する</li>
+    <li><strong>プラグインをインストール</strong> をクリックする</li>
+    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
+  </ol>
 
   <h3>ZIP からのインストール手順</h3>
   <ol>
@@ -442,7 +448,9 @@
 
   <h3>アップデート</h3>
   <p>
-    新しい ZIP が配布された場合は、同じ手順で上書きインストールできます。
+    QGIS公式リポジトリからインストールした場合は、
+    <strong>プラグインの管理とインストール → アップグレード可能</strong> に表示され次第、通常のプラグインと同様に更新できます。
+    ZIP からインストールした場合は、新しい ZIP を配布された際に同じ手順で上書きインストールしてください。
     または <strong>プラグインの管理とインストール → インストール済み</strong> から
     <code>Fcloud Shizuoka</code> を一度アンインストールしてから再インストールしてください。
   </p>
@@ -502,7 +510,7 @@
 
   <table>
     <tr><th>エリア</th><th>内容</th></tr>
-    <tr><td><strong>左パネル上部</strong></td><td>接続する GeoPackage レイヤーを選択するコンボボックス</td></tr>
+    <tr><td><strong>左パネル上部</strong></td><td>接続する GeoPackage レイヤー/SHPレイヤーを選択するコンボボックス</td></tr>
     <tr><td><strong>左パネル「選択中の小班」タブ</strong></td><td>地図上で選択したフィーチャーの森林簿属性を表示</td></tr>
     <tr><td><strong>左パネル「クラウド情報」タブ</strong></td><td>右パネルの表で選択した行の詳細情報を表示</td></tr>
     <tr><td><strong>右パネル</strong></td><td>保安林台帳・森の力・経営計画・林地開発の検索・表示</td></tr>
@@ -529,6 +537,10 @@
 
   <div class="note">
     GPKG レイヤーをプロジェクトに後から追加した場合でも、コンボボックスには自動的に反映されます。
+  </div>
+
+  <div class="tip">
+    静岡県配布の森林計画図SHPファイル（KEY1フィールドを含むもの）もコンボボックスから選択できます。
   </div>
 
   <hr>
@@ -815,7 +827,7 @@
 
   <hr>
   <p style="color:var(--muted); font-size:12px; text-align:center; margin-top:30px;">
-    Fcloud Shizuoka v0.1.0 &nbsp;／&nbsp; 静岡県専用プラグイン &nbsp;／&nbsp; Author: Hideharu Masai
+    Fcloud Shizuoka &nbsp;／&nbsp; 静岡県専用プラグイン &nbsp;／&nbsp; Developed by Avid Tree Work &nbsp;／&nbsp; Author: Hideharu Masai
   </p>
 
 </main>
