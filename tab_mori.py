@@ -11,6 +11,7 @@ from qgis.PyQt.QtCore import Qt, QUrl, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
+    Qgis, QgsMessageLog,
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry,
     QgsField, QgsVectorFileWriter, QgsFeatureRequest,
     QgsCoordinateTransform, QgsCoordinateReferenceSystem,
@@ -472,8 +473,10 @@ class MoriMixin:
                 for extra in geoms[1:]:
                     try:
                         geom = geom.combine(extra)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        QgsMessageLog.logMessage(
+                            f'[fcloud] mori geometry combine failed for {kanri}: {e}',
+                            level=Qgis.Warning)
             if not geom or geom.isEmpty():
                 continue
             qf = QgsFeature(layer.fields())
@@ -629,8 +632,10 @@ class MoriMixin:
                     merged = QgsGeometry.unaryUnion(transformed_geoms)
                     if merged and not merged.isEmpty():
                         bbox = merged.boundingBox()
-                except Exception:
-                    pass
+                except Exception as e:
+                    QgsMessageLog.logMessage(
+                        f'[fcloud] mori bbox unaryUnion failed: {e}',
+                        level=Qgis.Warning)
             if bbox and not bbox.isEmpty():
                 buf = max(bbox.width(), bbox.height()) * 0.60 + 5
                 bbox.grow(buf)

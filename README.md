@@ -40,9 +40,15 @@ Tested environment:
 
 ## Installation
 
-This plugin is currently intended for **independent ZIP distribution** and is not installed from the QGIS official plugin repository.
+### From the QGIS official plugin repository
 
-1. Download the distributed `fcloud_shizuoka.zip`
+1. In QGIS, open **Plugins → Manage and Install Plugins**
+2. Search for **Fcloud Shizuoka** and click **Install Plugin**
+3. Open the plugin from the toolbar icon or **Vector → 静岡県森林クラウド**
+
+### From ZIP
+
+1. Download `fcloud_shizuoka.zip`
 2. In QGIS, open **Plugins → Manage and Install Plugins**
 3. Choose **Install from ZIP**
 4. Select the ZIP file and install

@@ -15,7 +15,8 @@ import struct
 def _read_varint(buf, pos):
     result = shift = 0
     while True:
-        b = buf[pos]; pos += 1
+        b = buf[pos]
+        pos += 1
         result |= (b & 0x7F) << shift
         if not (b & 0x80):
             return result, pos
@@ -41,12 +42,15 @@ def _proto_fields(buf, start=0, end=None):
             val, pos = _read_varint(buf, pos)
             yield field, 0, val
         elif wire == 1:            # 64-bit fixed
-            yield field, 1, buf[pos:pos + 8]; pos += 8
+            yield field, 1, buf[pos:pos + 8]
+            pos += 8
         elif wire == 2:            # length-delimited
             length, pos = _read_varint(buf, pos)
-            yield field, 2, buf[pos:pos + length]; pos += length
+            yield field, 2, buf[pos:pos + length]
+            pos += length
         elif wire == 5:            # 32-bit fixed
-            yield field, 5, buf[pos:pos + 4]; pos += 4
+            yield field, 5, buf[pos:pos + 4]
+            pos += 4
         else:
             break
 
@@ -59,19 +63,24 @@ def _decode_commands(cmds):
     cx = cy = 0
     i = 0
     while i < len(cmds):
-        hdr = cmds[i]; i += 1
+        hdr = cmds[i]
+        i += 1
         cmd, count = hdr & 7, hdr >> 3
         if cmd == 1:               # MoveTo
             for _ in range(count):
-                cx += _zigzag(cmds[i]); i += 1
-                cy += _zigzag(cmds[i]); i += 1
+                cx += _zigzag(cmds[i])
+                i += 1
+                cy += _zigzag(cmds[i])
+                i += 1
                 if ring:
                     rings.append(ring)
                 ring = [(cx, cy)]
         elif cmd == 2:             # LineTo
             for _ in range(count):
-                cx += _zigzag(cmds[i]); i += 1
-                cy += _zigzag(cmds[i]); i += 1
+                cx += _zigzag(cmds[i])
+                i += 1
+                cy += _zigzag(cmds[i])
+                i += 1
                 ring.append((cx, cy))
         elif cmd == 7:             # ClosePath
             if ring:
@@ -139,13 +148,20 @@ def _rings_to_wkt(rings, tile_x, tile_y, zoom, extent):
 def _decode_value(buf):
     """Decode an MVT Value message → Python scalar."""
     for f, w, v in _proto_fields(buf):
-        if f == 1 and w == 2:   return v.decode('utf-8', errors='replace')
-        if f == 2 and w == 5:   return struct.unpack('<f', v)[0]
-        if f == 3 and w == 1:   return struct.unpack('<d', v)[0]
-        if f == 4 and w == 0:   return v                   # int64  (no zigzag)
-        if f == 5 and w == 0:   return v                   # uint64
-        if f == 6 and w == 0:   return _zigzag(v)          # sint64 (zigzag)
-        if f == 7 and w == 0:   return bool(v)
+        if f == 1 and w == 2:
+            return v.decode('utf-8', errors='replace')
+        if f == 2 and w == 5:
+            return struct.unpack('<f', v)[0]
+        if f == 3 and w == 1:
+            return struct.unpack('<d', v)[0]
+        if f == 4 and w == 0:
+            return v                                        # int64  (no zigzag)
+        if f == 5 and w == 0:
+            return v                                        # uint64
+        if f == 6 and w == 0:
+            return _zigzag(v)                                # sint64 (zigzag)
+        if f == 7 and w == 0:
+            return bool(v)
     return None
 
 
@@ -187,11 +203,16 @@ def parse_tile(tile_bytes, tile_x, tile_y, zoom, target_layer=None):
         raw_features = []
 
         for lf, lwt, lval in _proto_fields(layer_buf):
-            if   lf == 1  and lwt == 2: name = lval.decode('utf-8', errors='replace')
-            elif lf == 5  and lwt == 0: extent = lval
-            elif lf == 3  and lwt == 2: keys.append(lval.decode('utf-8', errors='replace'))
-            elif lf == 4  and lwt == 2: values.append(_decode_value(lval))
-            elif lf == 2  and lwt == 2: raw_features.append(lval)
+            if lf == 1 and lwt == 2:
+                name = lval.decode('utf-8', errors='replace')
+            elif lf == 5 and lwt == 0:
+                extent = lval
+            elif lf == 3 and lwt == 2:
+                keys.append(lval.decode('utf-8', errors='replace'))
+            elif lf == 4 and lwt == 2:
+                values.append(_decode_value(lval))
+            elif lf == 2 and lwt == 2:
+                raw_features.append(lval)
 
         if target_layer and name != target_layer:
             continue
@@ -202,9 +223,12 @@ def parse_tile(tile_bytes, tile_x, tile_y, zoom, target_layer=None):
             geom_buf = b''
 
             for ff, fwt, fval in _proto_fields(feat_buf):
-                if   ff == 3 and fwt == 0: geom_type = fval
-                elif ff == 2 and fwt == 2: tags_buf = fval
-                elif ff == 4 and fwt == 2: geom_buf = fval
+                if ff == 3 and fwt == 0:
+                    geom_type = fval
+                elif ff == 2 and fwt == 2:
+                    tags_buf = fval
+                elif ff == 4 and fwt == 2:
+                    geom_buf = fval
 
             if geom_type != 3:              # polygons only
                 continue

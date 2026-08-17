@@ -26,8 +26,8 @@ class FcloudShizuoka:
             try:
                 if not sip.isdeleted(hl):
                     scene.removeItem(hl)
-            except Exception:
-                pass
+            except RuntimeError:
+                pass  # チェック後にシーン側で既に削除された場合のみ発生
         self._highlights.clear()
         canvas.refresh()
 
@@ -74,14 +74,14 @@ class FcloudShizuoka:
     def unload(self):
         try:
             QgsProject.instance().readProject.disconnect(self._remove_stale_layers)
-        except Exception:
-            pass
+        except (TypeError, RuntimeError):
+            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         app = QApplication.instance()
         if app is not None:
             try:
                 app.aboutToQuit.disconnect(self._on_about_to_quit)
-            except Exception:
-                pass
+            except (TypeError, RuntimeError):
+                pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         self.iface.removeVectorToolBarIcon(self.action)
         self.iface.removePluginVectorMenu('静岡県森林クラウド', self.action)
         if self.dock:
@@ -111,7 +111,7 @@ class FcloudShizuoka:
             self.dock._sync_keikaku_layer_visibility(ensure_loaded=True)
             layer = self.dock._connected_layer
             if layer and not sip.isdeleted(layer):
-                QTimer.singleShot(200, lambda l=layer: self.iface.layerTreeView().setCurrentLayer(l))
+                QTimer.singleShot(200, lambda ly=layer: self.iface.layerTreeView().setCurrentLayer(ly))
         elif not checked:
             self.dock.setVisible(False)
             self.dock._first_show = True

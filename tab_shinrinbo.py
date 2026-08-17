@@ -136,8 +136,8 @@ class ShinrinboMixin:
             if layer is not None and not sip.isdeleted(layer):
                 try:
                     existing = {f.name() for f in layer.fields()}
-                except Exception:
-                    pass
+                except RuntimeError:
+                    pass  # チェック後にレイヤーが削除された場合のみ発生
             col_map = [
                 (src, label) for src, label in _PRIMARY_FIELDS
                 if src in existing
@@ -296,7 +296,8 @@ class ShinrinboMixin:
         def read_varint(buf, pos):
             result = shift = 0
             while True:
-                b = buf[pos]; pos += 1
+                b = buf[pos]
+                pos += 1
                 result |= (b & 0x7F) << shift
                 if not (b & 0x80):
                     return result, pos
@@ -320,19 +321,22 @@ class ShinrinboMixin:
             return None
 
         def parse_feature_tags(buf):
-            pos = 0; tags = []
+            pos = 0
+            tags = []
             while pos < len(buf):
                 tag, pos = read_varint(buf, pos)
                 field, wtype = tag >> 3, tag & 7
                 if field == 2 and wtype == 2:
                     l, pos = read_varint(buf, pos)
-                    chunk = buf[pos:pos + l]; pos += l
+                    chunk = buf[pos:pos + l]
+                    pos += l
                     p2 = 0
                     while p2 < len(chunk):
                         v, p2 = read_varint(chunk, p2)
                         tags.append(v)
                 elif wtype == 2:
-                    l, pos = read_varint(buf, pos); pos += l
+                    l, pos = read_varint(buf, pos)
+                    pos += l
                 elif wtype == 0:
                     _, pos = read_varint(buf, pos)
                 elif wtype in (1, 5):
@@ -342,13 +346,17 @@ class ShinrinboMixin:
             return tags
 
         def parse_layer(buf):
-            pos = 0; keys = []; vals = []; feat_tags_list = []
+            pos = 0
+            keys = []
+            vals = []
+            feat_tags_list = []
             while pos < len(buf):
                 tag, pos = read_varint(buf, pos)
                 field, wtype = tag >> 3, tag & 7
                 if wtype == 2:
                     l, pos = read_varint(buf, pos)
-                    chunk = buf[pos:pos + l]; pos += l
+                    chunk = buf[pos:pos + l]
+                    pos += l
                     if field == 3:
                         keys.append(chunk.decode('utf-8', errors='replace'))
                     elif field == 4:
@@ -372,10 +380,7 @@ class ShinrinboMixin:
                 l, pos = read_varint(buf, pos)
                 keys, vals, feat_tags_list = parse_layer(buf[pos:pos + l])
                 pos += l
-                try:
-                    ki_key1 = keys.index('KEY1')
-                    ki_fid = keys.index('THE_FID')
-                except ValueError:
+                if 'KEY1' not in keys or 'THE_FID' not in keys:
                     continue
                 mapping = {}
                 for tags in feat_tags_list:
@@ -387,7 +392,8 @@ class ShinrinboMixin:
                         mapping[k1] = int(fid)
                 return mapping
             elif wtype == 2:
-                l, pos = read_varint(buf, pos); pos += l
+                l, pos = read_varint(buf, pos)
+                pos += l
             elif wtype == 0:
                 _, pos = read_varint(buf, pos)
             elif wtype in (1, 5):

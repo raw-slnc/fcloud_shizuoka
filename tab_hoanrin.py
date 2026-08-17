@@ -4,20 +4,17 @@ import sip
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QLineEdit, QPushButton,
-    QTableWidgetItem, QHeaderView,
 )
 from qgis.PyQt.QtCore import Qt, QSettings
 from qgis.PyQt.QtGui import QColor, QBrush
 from qgis.core import (
     QgsProject, QgsFeatureRequest,
     QgsCoordinateTransform, QgsWkbTypes,
-    QgsCoordinateReferenceSystem,
 )
 from qgis.gui import QgsRubberBand
 
 from .constants import (
     _API_BASE, _CITY_API_MAP, _API_CITY_MAP, _CITY_CD,
-    _PRIMARY_FIELDS, _HISTORY_FIELDS,
 )
 
 # 保安林台帳専用ハイライト色
@@ -420,7 +417,6 @@ class HoanrinMixin:
         if not item:
             self._clear_cloud_record_info()
             return
-        row = rows[0].row()
         rec = item.data(Qt.UserRole)
         if not isinstance(rec, dict):
             self._clear_cloud_record_info()
@@ -448,8 +444,10 @@ class HoanrinMixin:
 
         def _loc():
             p = []
-            if city:  p.append(f'"市町村名称" = \'{city}\'')
-            if daiji: p.append(f'"大字名称" = \'{daiji}\'')
+            if city:
+                p.append(f'"市町村名称" = \'{city}\'')
+            if daiji:
+                p.append(f'"大字名称" = \'{daiji}\'')
             return p
 
         blue_feats, yellow_feats = [], []

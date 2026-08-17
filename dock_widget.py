@@ -14,9 +14,9 @@ from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer
 from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsFeatureRequest,
+    QgsProject, QgsVectorLayer,
     QgsNetworkAccessManager, QgsCoordinateTransform, QgsWkbTypes,
-    QgsCoordinateReferenceSystem, QgsLayerTreeLayer,
+    QgsLayerTreeLayer,
 )
 from qgis.gui import QgsRubberBand
 
@@ -783,19 +783,19 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             # 多重接続を避けるため、一旦切ってから繋ぎ直す（未接続でも例外は無視）
             try:
                 self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
-            except Exception:
-                pass
+            except (TypeError, RuntimeError):
+                pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
             try:
                 self._connected_layer.selectionChanged.connect(self._on_selection_changed)
-            except Exception:
-                pass
+            except RuntimeError:
+                pass  # チェックと接続の間でレイヤーが削除された場合のみ発生
 
     def _disconnect_selection_signal(self):
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
             try:
                 self._connected_layer.selectionChanged.disconnect(self._on_selection_changed)
-            except Exception:
-                pass
+            except (TypeError, RuntimeError):
+                pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
 
     def _on_layer_changed(self):
         self._last_combo_id = self.layer_combo.currentData()
@@ -826,7 +826,6 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                     self._connect_selection_signal()
                 self._apply_selection_color(layer)
                 flds = [f.name() for f in layer.fields()]
-                src = layer.source().lower()
                 if '市町村名称' in flds:
                     self._layer_type = 'gpkg'
                 elif '市町村CD' in flds and 'ID' in flds:
@@ -878,7 +877,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._sel_mode_orig = None
 
     def _refresh_city_combo(self, layer):
-        from .constants import _CITY_API_MAP, _API_CITY_MAP, _CD_CITY
+        from .constants import _API_CITY_MAP, _CD_CITY
 
         if '市町村名称' in [f.name() for f in layer.fields()]:
             idx = layer.fields().indexOf('市町村名称')
@@ -1136,19 +1135,19 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         for reply in list(self._pending_replies):
             try:
                 reply.abort()
-            except Exception:
-                pass
+            except RuntimeError:
+                pass  # 終了処理中に既に削除済みのreplyへのabort()は無視してよい
         super().closeEvent(event)
 
     def cleanup_on_unload(self):
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
-        except Exception:
-            pass
+        except (TypeError, RuntimeError):
+            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         try:
             self.iface.currentLayerChanged.disconnect(self._refresh_layer_combo)
-        except Exception:
-            pass
+        except (TypeError, RuntimeError):
+            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         self._restore_selection_color()
         self._clear_hoanrin_highlights()
         self._clear_selection_highlights()
@@ -1157,5 +1156,5 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         for reply in list(self._pending_replies):
             try:
                 reply.abort()
-            except Exception:
-                pass
+            except RuntimeError:
+                pass  # 終了処理中に既に削除済みのreplyへのabort()は無視してよい

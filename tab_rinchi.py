@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, QTimer, QUrl, QVariant
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
+    Qgis, QgsMessageLog,
     QgsProject, QgsFeatureRequest, QgsGeometry,
     QgsCoordinateTransform, QgsCoordinateReferenceSystem,
     QgsPointXY, QgsRectangle, QgsNetworkAccessManager,
@@ -839,7 +840,6 @@ class RinchiMixin:
                            'MAGIS.RINCHI_KAIHATSU_KYOKA/{z}/{x}/{y}.pbf')
 
             from .mvt_loader import _lon_to_tile_x, _lat_to_tile_y, parse_tile
-            import urllib.request as _ur
 
             zoom = self._RINCHI_MVT_ZOOM
             x0 = _lon_to_tile_x(city_bbox_4326.xMinimum(), zoom)
@@ -854,7 +854,9 @@ class RinchiMixin:
                                  .replace('{x}', str(tx)) \
                                  .replace('{y}', str(ty))
                     try:
-                        raw = _ur.urlopen(url, timeout=5).read()
+                        req = QNetworkRequest(QUrl(url))
+                        reply = QgsNetworkAccessManager.instance().blockingGet(req)
+                        raw = bytes(reply.content())
                         for feat in parse_tile(raw, tx, ty, zoom):
                             mvt_name = str(feat.get('申請者_法人名等', '') or '')
                             if mvt_name and (mvt_name == shinseisha
@@ -868,7 +870,10 @@ class RinchiMixin:
                                     else:
                                         match_bbox.combineExtentWith(b)
                     except Exception:
-                        pass
+                        # 個々のタイルの取得/protobuf解析失敗（struct.error等、型を
+                        # 網羅しきれない）は無視して次のタイルへ進む。ループ内で
+                        # ログを出すとタイル数分スパムになるため出力しない。
+                        pass  # nosec B110
 
             if match_bbox and not match_bbox.isEmpty():
                 match_bbox.grow(max(match_bbox.width(), match_bbox.height()) * 0.30)
@@ -890,5 +895,7 @@ class RinchiMixin:
                 canvas.setExtent(QgsRectangle(
                     pt.x() - buf, pt.y() - buf, pt.x() + buf, pt.y() + buf))
                 canvas.refresh()
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f'[fcloud] rinchi highlight-point zoom failed: {e}',
+                    level=Qgis.Warning)
