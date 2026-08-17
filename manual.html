@@ -348,6 +348,7 @@
     <li class="sub"><a href="#rinchi">林地開発</a></li>
     <li class="section">機能解説</li>
     <li><a href="#highlight">ハイライト凡例</a></li>
+    <li><a href="#kozu">公図連携（kozu_xml_integrator）</a></li>
     <li><a href="#cache">キャッシュ機能</a></li>
     <li><a href="#layers">レイヤー追加</a></li>
   </ul>
@@ -566,7 +567,7 @@
   <table>
     <tr><th>ボタン</th><th>説明</th></tr>
     <tr><td><strong>近傍データ ON/OFF</strong></td><td>地番の一桁・二桁ズレの近傍フィーチャーを黄・赤・橙でハイライト表示します。デフォルトはOFFです。</td></tr>
-    <tr><td><strong>公図連携 ON/OFF</strong></td><td>kozu_xml_integrator プラグインと連携し、行選択時に自動で公図を呼び出します。kozu_xml_integrator がインストールされていない場合は無効です。</td></tr>
+    <tr><td><strong>公図連携 ON/OFF</strong></td><td>kozu_xml_integrator プラグインと連携し、行選択時に自動で公図を呼び出します。kozu_xml_integrator がインストールされていない場合は無効です（詳細は<a href="#kozu">公図連携</a>参照）。</td></tr>
   </table>
 
   <hr>
@@ -711,6 +712,52 @@
     <li><strong>青がなく黄・赤が存在する場合</strong>：黄・赤を表示（橙は表示しない）</li>
     <li><strong>黄・赤も存在しない場合</strong>：橙のみ表示（救済表示）</li>
   </ul>
+
+  <hr>
+
+  <!-- ── kozu連携 ── -->
+  <span class="section-anchor" id="kozu"></span>
+  <h2>公図連携（kozu_xml_integrator）</h2>
+  <p>
+    <strong>kozu_xml_integrator</strong> プラグインがインストールされている場合、
+    保安林台帳・森林簿タブの「公図連携 ON/OFF」ボタンを ON にすることで、
+    テーブルの行選択のたびに対応する大字・地番を kozu_xml_integrator 側へ自動送信し、
+    法務局地図（公図）を検索・表示できます。
+  </p>
+
+  <div class="flow">
+    <div class="flow-step">①「公図連携」を ON</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② テーブルの行を選択</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③ kozu 側で大字選択・地番検索を自動実行</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">④ 該当箇所へズーム</div>
+  </div>
+
+  <table>
+    <tr><th>送信元タブ</th><th>大字として送信する値</th><th>地番として送信する値</th></tr>
+    <tr><td>保安林台帳</td><td>大字</td><td>親番（枝番がある場合は「親番-枝番」に結合）</td></tr>
+    <tr><td>森林簿</td><td>大字名称</td><td>地番_親番と地番_枝番を「親番-枝番」に結合</td></tr>
+  </table>
+
+  <div class="tip">
+    連携 ON 時に kozu_xml_integrator のウィンドウがまだ開いていなければ自動的に起動します。
+    ウィンドウを手動で閉じた場合、連携ボタンが ON のままでも以降の行選択では再送信されません。
+    一度 OFF にしてから再度 ON にしてください。
+  </div>
+
+  <div class="warn">
+    <strong>kozu_xml_integrator 側のデータベースに、対象市町村の法務局地図XMLが
+    インポート済みであることが前提条件です。</strong>
+    未インポートの市町村・大字を選択した場合、kozu のウィンドウは開き地番欄に
+    文字は入力されますが、大字の選択・地番検索のどちらも一致するデータが見つからないため
+    目に見えるエラーは表示されないまま無反応に見えます（大字コンボボックスは
+    候補にない文字列を渡されても無言で無視するため）。
+    連携がうまく動かない場合は、まず kozu_xml_integrator の「大字」タブを開き、
+    対象の市町村・大字がコンボボックスの一覧に存在するか（＝該当地域のXMLが
+    インポート済みか）を確認してください。
+  </div>
 
   <hr>
 
