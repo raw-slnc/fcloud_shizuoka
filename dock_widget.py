@@ -204,6 +204,12 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.left_tab.setCornerWidget(_help_lbl, Qt.TopRightCorner)
 
         left_v.addWidget(self.left_tab, 1)
+
+        _credit_lbl = QLabel('Developed by Avid Tree Work')
+        _credit_lbl.setStyleSheet('color: gray; font-size: 10px;')
+        _credit_lbl.setAlignment(Qt.AlignLeft)
+        left_v.addWidget(_credit_lbl)
+
         main.addWidget(left_w)
 
         sep = QFrame()
