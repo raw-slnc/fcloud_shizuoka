@@ -432,7 +432,9 @@ class HoanrinMixin:
         if chiban:
             self._highlight_by_chiban(chiban, gpkg_city, daiji, chiban2)
         if self.btn_kozu.isChecked():
-            self._send_to_kozu(daiji, chiban)
+            # kozu側のchiban形式（親番-枝番）に合わせて合成してから送信
+            kozu_chiban = f'{chiban}-{chiban2}' if chiban2 and chiban2 != '0' else chiban
+            self._send_to_kozu(daiji, kozu_chiban)
 
     def _highlight_by_chiban(self, chiban, city='', daiji='', chiban2=''):
         if self._layer_type != 'gpkg':
