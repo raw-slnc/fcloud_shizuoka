@@ -32,13 +32,14 @@ from .tab_mori      import MoriMixin
 from .tab_keikaku   import KeikakuMixin
 from .tab_rinchi    import RinchiMixin
 from .tab_shinrinbo import ShinrinboMixin
+from .tab_seibi     import SeibiMixin
 
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
 _HL_SEL_FILL   = QColor(210,  30,  30,  25)
 
 
-class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QDockWidget):
+class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, SeibiMixin, QDockWidget):
     _TAB_ORDER_VERSION = 2
 
     def __init__(self, iface, highlights=None, parent=None):
@@ -82,6 +83,20 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._rinchi_tiles_pending     = 0
         self._rinchi_tiles_received    = 0
         self._rinchi_loading           = False
+        self._seibi_raw_by_year       = {}
+        self._seibi_pending_years     = []
+        self._seibi_years_total       = 0
+        self._seibi_all_records       = []
+        self._seibi_unfiltered_records = []
+        self._seibi_records_layer_id  = None
+        self._seibi_search_gen        = 0
+        self._seibi_spatial_index     = None
+        self._seibi_index_layer_id    = None
+        self._seibi_markers           = []
+        self._seibi_highlight_gen     = 0
+        self._seibi_highlight_target  = None
+        self._seibi_highlight_features = []
+        self._seibi_highlight_pending = 0
         self._prev_tab_index           = -1
         self._first_show               = True
         self._layer_type               = 'gpkg'  # 'gpkg' | 'cd_gpkg' | 'shp'
@@ -92,6 +107,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._shinrinbo_col_map        = []
         self._mvt_tile_cache           = {}  # (z,x,y) → {key1: fid}
         self._info_gen                 = 0
+        self._last_processed_selected_ids = None  # showEvent での無駄な再取得を避けるためのキャッシュ
         self._layer_refresh_timer      = QTimer(self)
         self._layer_refresh_timer.setSingleShot(True)
         self._layer_refresh_timer.timeout.connect(self._refresh_layer_combo)
@@ -308,16 +324,6 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'manual.html')
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def _build_tab_seibi(self):
-        from qgis.PyQt.QtWidgets import QWidget, QVBoxLayout, QLabel
-        w = QWidget()
-        v = QVBoxLayout(w)
-        lbl = QLabel('森林クラウド側未実装')
-        lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet('color: gray; font-size: 13px; padding: 20px;')
-        v.addWidget(lbl)
-        return w
-
     # ------------------------------------------------------------------
     # 共通ユーティリティ
     # ------------------------------------------------------------------
@@ -489,6 +495,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._remove_mori_vector_layer()
         self._remove_keikaku_vector_layer()
         self._remove_rinchi_layers()
+        self._clear_seibi_markers()
         self._toggle_mvt_layer('', 'fcloud_林道', False)
         for btn in (self.btn_mori_layer, self.btn_keikaku_layer, self.btn_rinchi_layer, self.btn_rindo):
             btn.blockSignals(True)
@@ -559,13 +566,18 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         needs_refresh = False
         if prev == 0 and index != 0:
             self._clear_selection_highlights()
+        elif prev == 2 and index != 2:
+            self._clear_selection_highlights()
+            self._clear_seibi_markers()
         elif prev == 3 and index != 3:
             self._clear_mori_markers()
             needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, False) or needs_refresh
         elif prev == 4 and index != 4:
             self._clear_selection_highlights()
             needs_refresh = self._set_layer_visible(self._keikaku_vector_layer_id, False) or needs_refresh
-        if index == 3 and prev != 3:
+        if index == 2 and prev != 2:
+            self._ensure_seibi_auto_search()
+        elif index == 3 and prev != 3:
             if self.btn_mori_layer.isChecked():
                 needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, True) or needs_refresh
         elif index == 4 and prev != 4:
@@ -665,7 +677,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(not no_data)
         elif tab == 2:
-            # 整備事業: 未実装
+            # 整備事業: 年度ごとにAPI取得と同時にローカルDBへ自動保存されるため、
+            # 下部バーの保存/更新ボタンは使用しない
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
         elif tab == 0:
@@ -808,6 +821,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._restore_selection_color()
         self._disconnect_selection_signal()
         self._connected_layer = None
+        self._last_processed_selected_ids = None
         self._current_shinrinbo_key = ''
         self._shinrinbo_api_ids = []
         self._shinrinbo_col_map = []
@@ -841,6 +855,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 self._init_shinrinbo_headers()
                 self._refresh_city_combo(layer)
         self._update_keikaku_load_btn()
+        self._update_seibi_layer_state()
 
     # ------------------------------------------------------------------
     # 連携レイヤーの選択ハイライト（塗り20%に変更・復元）
@@ -942,6 +957,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             self._connected_layer = None
             return
         features = list(self._connected_layer.getSelectedFeatures())
+        self._last_processed_selected_ids = {f.id() for f in features}
         if not features:
             self.lbl_selected.setText('GPKGレイヤーで選択してください')
             self.info_browser.clear()
@@ -1126,7 +1142,11 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             if self._sel_color_layer_id is None:
                 self._apply_selection_color(self._connected_layer)
             self._connect_selection_signal()
-            self._on_selection_changed(None, None, None)
+            # フロート化/格納のたびにhide→showが走るため、選択内容が変わっていなければ
+            # 森林簿API等の再取得（cd_gpkgの場合はMVT解決＋API呼び出し）をスキップする。
+            current_ids = set(self._connected_layer.selectedFeatureIds())
+            if current_ids != self._last_processed_selected_ids:
+                self._on_selection_changed(None, None, None)
 
     def hideEvent(self, event):
         super().hideEvent(event)

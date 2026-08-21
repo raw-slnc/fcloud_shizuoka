@@ -263,6 +263,7 @@
   .section-anchor { display: block; height: 0; margin-top: -20px; padding-top: 20px; }
 
   hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  hr.hr-tight { margin: 14px 0; }
 
   @media (max-width: 768px) {
     nav { display: none; }
@@ -342,7 +343,9 @@
     <li><a href="#ui">画面構成</a></li>
     <li><a href="#connect">GPKGレイヤー接続</a></li>
     <li class="section">各タブ</li>
+    <li class="sub"><a href="#shinrinbo">森林簿</a></li>
     <li class="sub"><a href="#hoanrin">保安林台帳</a></li>
+    <li class="sub"><a href="#seibi">整備事業</a></li>
     <li class="sub"><a href="#mori">森の力</a></li>
     <li class="sub"><a href="#keikaku">経営計画</a></li>
     <li class="sub"><a href="#rinchi">林地開発</a></li>
@@ -358,11 +361,19 @@
 <main>
 
   <h1>Fcloud Shizuoka 操作マニュアル</h1>
-  <p class="subtitle">バージョン 0.1.0 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
+  <p class="subtitle">バージョン 0.1.4 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
 
   <!-- ── 概要 ── -->
   <span class="section-anchor" id="overview"></span>
   <h2>概要</h2>
+  <p>
+    本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
+    静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
+    QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
+  </p>
+
+  <hr class="hr-tight">
+
   <p>
     <strong>Fcloud Shizuoka</strong> は、静岡県森林クラウド（fcloud.pref.shizuoka.jp）の公開APIと、
     Shinrinbo Code Converter が生成した森林簿 GeoPackage を連携させる QGIS プラグインです。
@@ -391,12 +402,6 @@
       </ul>
     </div>
   </div>
-
-  <p>
-    本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
-    静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
-    QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
-  </p>
 
   <div class="tip">
     静岡県が配布する森林計画図SHPファイル（KEY1フィールドを含むもの）も
@@ -481,6 +486,7 @@
       <div class="ui-right-panel">
         <div class="ui-panel-header">右パネル（森林クラウド検索）</div>
         <div class="ui-tab-bar">
+          <div class="ui-tab">森林簿</div>
           <div class="ui-tab active">保安林台帳</div>
           <div class="ui-tab">整備事業</div>
           <div class="ui-tab">森の力</div>
@@ -513,7 +519,7 @@
     <tr><td><strong>左パネル上部</strong></td><td>接続する GeoPackage レイヤー/SHPレイヤーを選択するコンボボックス</td></tr>
     <tr><td><strong>左パネル「選択中の小班」タブ</strong></td><td>地図上で選択したフィーチャーの森林簿属性を表示</td></tr>
     <tr><td><strong>左パネル「クラウド情報」タブ</strong></td><td>右パネルの表で選択した行の詳細情報を表示</td></tr>
-    <tr><td><strong>右パネル</strong></td><td>保安林台帳・森の力・経営計画・林地開発の検索・表示</td></tr>
+    <tr><td><strong>右パネル</strong></td><td>森林簿・保安林台帳・整備事業・森の力・経営計画・林地開発の検索・表示</td></tr>
     <tr><td><strong>下部バー</strong></td><td>レイヤー追加ボタン、キャッシュ操作</td></tr>
   </table>
 
@@ -541,6 +547,34 @@
 
   <div class="tip">
     静岡県配布の森林計画図SHPファイル（KEY1フィールドを含むもの）もコンボボックスから選択できます。
+  </div>
+
+  <hr>
+
+  <!-- ── 森林簿 ── -->
+  <span class="section-anchor" id="shinrinbo"></span>
+  <h2>森林簿</h2>
+  <p>
+    条件を指定して検索するタブではなく、地図上（接続中の GPKG/SHP レイヤー）で選択したフィーチャーの
+    森林簿属性をそのまま一覧表示するタブです。複数フィーチャーを選択した場合は、選択した数だけ行が表示されます。
+  </p>
+
+  <h3>接続レイヤーの種類による違い</h3>
+  <table>
+    <tr><th>レイヤー種別</th><th>表示内容</th></tr>
+    <tr><td>森林簿属性を含む GeoPackage</td><td>GPKG に含まれる属性をそのまま表示します（ネットワーク通信なし）</td></tr>
+    <tr><td>CDのみの GeoPackage</td><td>MVT タイルで小班IDを解決したのち、森林簿APIから属性を取得して表示します</td></tr>
+    <tr><td>森林計画図SHP</td><td>森林簿属性を持たないため、表は空のままになります</td></tr>
+  </table>
+
+  <h3>行選択とハイライト</h3>
+  <p>
+    テーブルの行を選択すると、対応するフィーチャーの位置に地図がズームし、ハイライト表示されます。
+  </p>
+
+  <div class="tip">
+    「公図連携 ON/OFF」ボタンを ON にすると、行選択のたびに kozu_xml_integrator へ大字・地番を自動送信します
+    （詳細は<a href="#kozu">公図連携</a>参照）。
   </div>
 
   <hr>
@@ -581,6 +615,49 @@
     <tr><td><strong>近傍データ ON/OFF</strong></td><td>地番の一桁・二桁ズレの近傍フィーチャーを黄・赤・橙でハイライト表示します。デフォルトはOFFです。</td></tr>
     <tr><td><strong>公図連携 ON/OFF</strong></td><td>kozu_xml_integrator プラグインと連携し、行選択時に自動で公図を呼び出します。kozu_xml_integrator がインストールされていない場合は無効です（詳細は<a href="#kozu">公図連携</a>参照）。</td></tr>
   </table>
+
+  <hr>
+
+  <!-- ── 整備事業 ── -->
+  <span class="section-anchor" id="seibi"></span>
+  <h2>整備事業</h2>
+  <p>
+    森林環境保全直接支援など、森林整備事業の実施記録を年度・事業内容・種類・樹種で検索します。
+  </p>
+
+  <h3>検索手順</h3>
+  <div class="flow">
+    <div class="flow-step">① 年度を選択（個別年度または「全年度」）</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 必要に応じて「過去〇年」で範囲を拡張</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「検索」ボタン</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">④ 事業内容・種類・樹種で絞り込み（任意）</div>
+  </div>
+
+  <div class="tip">
+    年度で「全年度」を選ぶと、事業年度を問わず一括取得します（この場合「過去〇年」の指定は無視されます）。
+    個別の年度を選んだときのみ「過去〇年」が有効になり、選んだ年度からその年数分さかのぼった範囲で検索します。
+  </div>
+
+  <h3>接続レイヤー範囲での絞り込み</h3>
+  <p>
+    取得した事業は、接続中の GeoPackage/SHP レイヤーのポリゴン範囲に含まれるものだけに絞り込んで一覧表示します。
+    森林環境保全直接支援等の事業は市町村単位ではなく県内全域が対象のため、保安林台帳のような市町村での絞り込みではなく、
+    接続レイヤーの空間範囲を基準に絞り込んでいます。件数は「絞り込み後の件数（接続レイヤー範囲内） / 絞り込み前の全件数」の形式で表示されます。
+  </p>
+
+  <h3>行選択とハイライト</h3>
+  <p>
+    テーブルの行を選択すると該当地点へズームし、対象の事業区画（ポリゴン）が地図上にハイライト表示されます。
+    区画の輪郭が取得できない場合は、代わりに地点マーカー（×印）のみが表示されます。
+  </p>
+
+  <div class="note">
+    検索条件（年度・過去〇年）は次回起動時にも自動的に復元され、タブを開くと前回の条件で自動的に再検索されます
+    （年度ごとにローカルキャッシュがあればネットワーク再取得は発生しません）。
+  </div>
 
   <hr>
 
@@ -796,6 +873,7 @@
   <table>
     <tr><th>タブ</th><th>キャッシュ形式</th><th>備考</th></tr>
     <tr><td>保安林台帳</td><td>SQLite（市町村別）</td><td>連携GPKGに含まれる市町村範囲を保存・更新。大字リストも自動キャッシュ</td></tr>
+    <tr><td>整備事業</td><td>SQLite（年度別）</td><td>年度ごとに自動保存。「ローカル保存」「更新」ボタンは使用しません（検索のたびに自動でキャッシュされます）</td></tr>
     <tr><td>森の力</td><td>SQLite（検索条件別）＋ GPKG</td><td>テーブルデータと実施箇所ポリゴンを別々にキャッシュ</td></tr>
     <tr><td>経営計画</td><td>SQLite（全件）＋ GPKG</td><td>読み込み時に自動保存。次回はキャッシュから高速読み込み</td></tr>
     <tr><td>林地開発</td><td>SQLite（検索条件別）</td><td>市町村・開発区分・開発目的の組み合わせでキャッシュ</td></tr>

@@ -170,6 +170,7 @@ _CITY_TO_NORIN = {
 _SHIZUOKA_BBOX     = (137.40, 34.50, 139.20, 35.80)  # (minLon, minLat, maxLon, maxLat) EPSG:4326
 _KEIKAKU_MVT_ZOOM  = 13
 _MORI_MVT_ZOOM     = 13
+_SEIBI_MVT_ZOOM    = 12
 
 _NORIN_OFFICES = [
     '賀茂農林事務所', '東部農林事務所', '富士農林事務所', '中部農林事務所',
@@ -209,3 +210,18 @@ def _build_nendo_list():
 
 
 _NENDO_LIST = _build_nendo_list()
+
+
+def _build_seibi_nendo_list():
+    """整備事業検索APIは西暦年（例: '2021'）を受け取るため、_NENDO_LIST（和暦文字列）とは別に用意する。"""
+    items = []
+    for y in range(datetime.date.today().year, 2005, -1):
+        if y >= 2019:
+            wareki = f'令和{y - 2018}年度'
+        else:
+            wareki = f'平成{y - 1988}年度'
+        items.append((f'{wareki} ({y})', y))
+    return items
+
+
+_SEIBI_NENDO_LIST = _build_seibi_nendo_list()
