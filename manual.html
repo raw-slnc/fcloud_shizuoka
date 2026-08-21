@@ -88,7 +88,8 @@
   ul, ol { padding-left: 20px; margin-bottom: 10px; }
   li { line-height: 1.75; }
 
-  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 30px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  #overview + h2 { margin-top: 8px; }
 
   /* ── カード ── */
   .card {
@@ -263,6 +264,7 @@
   .section-anchor { display: block; height: 0; margin-top: -20px; padding-top: 20px; }
 
   hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  hr.hr-tight { margin: 14px 0; }
 
   @media (max-width: 768px) {
     nav { display: none; }
@@ -342,6 +344,7 @@
     <li><a href="#ui">画面構成</a></li>
     <li><a href="#connect">GPKGレイヤー接続</a></li>
     <li class="section">各タブ</li>
+    <li class="sub"><a href="#shinrinbo">森林簿</a></li>
     <li class="sub"><a href="#hoanrin">保安林台帳</a></li>
     <li class="sub"><a href="#mori">森の力</a></li>
     <li class="sub"><a href="#keikaku">経営計画</a></li>
@@ -358,11 +361,19 @@
 <main>
 
   <h1>Fcloud Shizuoka 操作マニュアル</h1>
-  <p class="subtitle">バージョン 0.1.0 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
+  <p class="subtitle">バージョン 0.1.4 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
 
   <!-- ── 概要 ── -->
   <span class="section-anchor" id="overview"></span>
   <h2>概要</h2>
+  <p>
+    本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
+    静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
+    QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
+  </p>
+
+  <hr class="hr-tight">
+
   <p>
     <strong>Fcloud Shizuoka</strong> は、静岡県森林クラウド（fcloud.pref.shizuoka.jp）の公開APIと、
     Shinrinbo Code Converter が生成した森林簿 GeoPackage を連携させる QGIS プラグインです。
@@ -391,12 +402,6 @@
       </ul>
     </div>
   </div>
-
-  <p>
-    本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
-    静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
-    QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
-  </p>
 
   <div class="tip">
     静岡県が配布する森林計画図SHPファイル（KEY1フィールドを含むもの）も
@@ -541,6 +546,34 @@
 
   <div class="tip">
     静岡県配布の森林計画図SHPファイル（KEY1フィールドを含むもの）もコンボボックスから選択できます。
+  </div>
+
+  <hr>
+
+  <!-- ── 森林簿 ── -->
+  <span class="section-anchor" id="shinrinbo"></span>
+  <h2>森林簿</h2>
+  <p>
+    条件を指定して検索するタブではなく、地図上（接続中の GPKG/SHP レイヤー）で選択したフィーチャーの
+    森林簿属性をそのまま一覧表示するタブです。複数フィーチャーを選択した場合は、選択した数だけ行が表示されます。
+  </p>
+
+  <h3>接続レイヤーの種類による違い</h3>
+  <table>
+    <tr><th>レイヤー種別</th><th>表示内容</th></tr>
+    <tr><td>森林簿属性を含む GeoPackage</td><td>GPKG に含まれる属性をそのまま表示します（ネットワーク通信なし）</td></tr>
+    <tr><td>CDのみの GeoPackage</td><td>MVT タイルで小班IDを解決したのち、森林簿APIから属性を取得して表示します</td></tr>
+    <tr><td>森林計画図SHP</td><td>森林簿属性を持たないため、表は空のままになります</td></tr>
+  </table>
+
+  <h3>行選択とハイライト</h3>
+  <p>
+    テーブルの行を選択すると、対応するフィーチャーの位置に地図がズームし、ハイライト表示されます。
+  </p>
+
+  <div class="tip">
+    「公図連携 ON/OFF」ボタンを ON にすると、行選択のたびに kozu_xml_integrator へ大字・地番を自動送信します
+    （詳細は<a href="#kozu">公図連携</a>参照）。
   </div>
 
   <hr>

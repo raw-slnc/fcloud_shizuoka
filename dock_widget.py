@@ -724,7 +724,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         QgsProject.instance().layersAdded.connect(self._refresh_layer_combo)
         QgsProject.instance().layersRemoved.connect(self._refresh_layer_combo)
         QgsProject.instance().readProject.connect(self._on_project_read)
-        self.iface.currentLayerChanged.connect(self._refresh_layer_combo)
+        # 注意: iface.currentLayerChanged にはあえて接続しない。
+        # レイヤーパネルでのクリックにプラグインの接続先が追従すると、
+        # 意図せず接続GPKGが切り替わってしまうため。
 
     def _on_project_read(self, *_):
         self._schedule_layer_combo_refresh()
@@ -748,10 +750,14 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             yield layer
 
     def _refresh_layer_combo(self, *_):
+        """コンボの候補を再構築し、接続先を決定する。
+
+        QGIS側でどのレイヤーがアクティブかには一切左右されない
+        （レイヤーパネルでのクリックでプラグインの接続先が勝手に切り替わるのを防ぐため）。
+        保存済みのレイヤーID→レイヤー名の順で前回接続先の復元のみ行い、
+        どちらも見つからなければコンボは「空」のままにする。
+        """
         settings = QSettings()
-        # アクティブレイヤーが有効な対象なら優先、なければ保存値を使用
-        active = self.iface.activeLayer()
-        active_id = active.id() if isinstance(active, QgsVectorLayer) else ''
         current_id = (self.layer_combo.currentData()
                       or settings.value('fcloud_shizuoka/layer_id', ''))
         self.layer_combo.blockSignals(True)
@@ -768,16 +774,16 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             if layer.fields().indexOf('KEY1') < 0:
                 continue
             self.layer_combo.addItem(layer.name(), layer.id())
-        # アクティブレイヤーがコンボに存在すれば優先選択、なければ保存値で復元
-        idx = self.layer_combo.findData(active_id) if active_id else -1
-        if idx < 0 and current_id:
+
+        idx = -1
+        if current_id:
             idx = self.layer_combo.findData(current_id)
             if idx < 0:
                 saved_name = settings.value('fcloud_shizuoka/layer_name', '')
                 if saved_name:
                     idx = self.layer_combo.findText(saved_name)
-        if idx >= 0:
-            self.layer_combo.setCurrentIndex(idx)
+        # 見つからなければ明示的に「空」にする（Qtのデフォルト＝先頭候補への自動選択を防ぐ）
+        self.layer_combo.setCurrentIndex(idx)
         self.layer_combo.blockSignals(False)
         new_id = self.layer_combo.currentData()
         if new_id != getattr(self, '_last_combo_id', None):
@@ -1148,10 +1154,6 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
     def cleanup_on_unload(self):
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
-        except (TypeError, RuntimeError):
-            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
-        try:
-            self.iface.currentLayerChanged.disconnect(self._refresh_layer_combo)
         except (TypeError, RuntimeError):
             pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         self._restore_selection_color()

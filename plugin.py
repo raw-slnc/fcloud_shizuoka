@@ -44,7 +44,7 @@ class FcloudShizuoka:
         self.action = QAction(icon, '静岡県森林クラウド', self.iface.mainWindow())
         self.action.setCheckable(True)
         self.action.triggered.connect(self._toggle_dock)
-        self.dock.visibilityChanged.connect(self.action.setChecked)
+        self.dock.visibilityChanged.connect(self._on_dock_visibility_changed)
 
         self.iface.addVectorToolBarIcon(self.action)
         self.iface.addPluginToVectorMenu('静岡県森林クラウド', self.action)
@@ -104,6 +104,15 @@ class FcloudShizuoka:
     def _on_about_to_quit(self):
         self._shutdown_dock()
 
+    def _on_dock_visibility_changed(self, visible):
+        """ツールバーのトグルだけでなく、ドック純正の✕ボタンでの非表示も含めて
+        あらゆる経路の可視状態変化を拾う。非表示になったら次回表示時に再び
+        「初回表示」扱いにする（✕ボタンは_toggle_dockを経由しないため、
+        ここでリセットしないと接続レイヤーの自動アクティブ化が働かなくなる）。"""
+        self.action.setChecked(visible)
+        if not visible:
+            self.dock._first_show = True
+
     def _toggle_dock(self, checked):
         if checked and self.dock._first_show:
             self.dock.setVisible(True)
@@ -114,7 +123,6 @@ class FcloudShizuoka:
                 QTimer.singleShot(200, lambda ly=layer: self.iface.layerTreeView().setCurrentLayer(ly))
         elif not checked:
             self.dock.setVisible(False)
-            self.dock._first_show = True
         else:
             self.dock.setVisible(True)
             self.dock._sync_keikaku_layer_visibility(ensure_loaded=True)
