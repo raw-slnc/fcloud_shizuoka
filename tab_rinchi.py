@@ -5,7 +5,7 @@ import sip
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QComboBox, QLabel, QLineEdit, QPushButton,
+    QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton,
     QTableWidgetItem, QHeaderView,
 )
 from qgis.PyQt.QtCore import Qt, QTimer, QUrl, QVariant
@@ -19,8 +19,9 @@ from qgis.core import (
 )
 
 from .constants import (
-    _API_BASE, _API_CITY_MAP, _CITY_CD, _RINCHI_MOKUTEKI,
-    _SHIZUOKA_BBOX,
+    _API_BASE, _API_CITY_MAP, _CD_CITY, _CITY_CD,
+    _RINCHI_MOKUTEKI, _RINCHI_SHICHOSON,
+    _SHIZUOKA_BBOX, _TOGGLE_BTN_QSS_LAYER,
 )
 from .layer_cleanup import remove_project_layer
 
@@ -76,6 +77,7 @@ class RinchiMixin:
         row1.addStretch()
         self.btn_rinchi_layer = QPushButton('林地開発レイヤー')
         self.btn_rinchi_layer.setCheckable(True)
+        self.btn_rinchi_layer.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         self.btn_rinchi_layer.setToolTip('林地開発の絞り込み結果を地図に表示/非表示')
         row1.addWidget(self.btn_rinchi_layer)
         v.addLayout(row1)
@@ -83,13 +85,22 @@ class RinchiMixin:
         row2 = QHBoxLayout()
         row2.addWidget(QLabel('所在市町村:'))
         self.combo_rinchi_city = QComboBox()
-        self.combo_rinchi_city.addItem('（全て）', '')
+        # 候補は森林クラウドの林地開発検索と同じ固定リスト。「計画図情報で絞込」
+        # チェックONのときは接続レイヤーに出てくる市町村だけに絞る
+        self._apply_rinchi_city_filter(None)
         row2.addWidget(self.combo_rinchi_city, 2)
         row2.addSpacing(4)
         row2.addWidget(QLabel('所在地:'))
         self.edit_rinchi_shozaichi = QLineEdit()
         self.edit_rinchi_shozaichi.setPlaceholderText('所在地（任意）')
         row2.addWidget(self.edit_rinchi_shozaichi, 3)
+        row2.addSpacing(4)
+        self.chk_rinchi_city_in_layer = QCheckBox('計画図情報で絞込')
+        self.chk_rinchi_city_in_layer.setChecked(True)
+        self.chk_rinchi_city_in_layer.setToolTip(
+            'ONのとき、接続した計画図レイヤーに含まれる市町村だけを所在市町村の'
+            '候補に出す。OFFで森林クラウドの全市町村を出す。')
+        row2.addWidget(self.chk_rinchi_city_in_layer)
         self._rinchi_shozaichi_timer = QTimer(w)
         self._rinchi_shozaichi_timer.setSingleShot(True)
         self._rinchi_shozaichi_timer.setInterval(180)
@@ -118,11 +129,79 @@ class RinchiMixin:
         self.combo_rinchi_kubun.activated.connect(self._on_rinchi_search_filter_changed)
         self.combo_rinchi_mokuteki.activated.connect(self._on_rinchi_search_filter_changed)
         self.combo_rinchi_city.activated.connect(self._on_rinchi_search_filter_changed)
+        self.chk_rinchi_city_in_layer.toggled.connect(self._on_rinchi_city_scope_toggled)
         self.combo_rinchi_shinseisha.currentIndexChanged.connect(self._on_rinchi_shinseisha_changed)
         self.edit_rinchi_shozaichi.textChanged.connect(self._on_rinchi_shozaichi_text_changed)
         self.tbl_rinchi.itemSelectionChanged.connect(self._on_rinchi_selected)
         self.btn_rinchi_layer.toggled.connect(self._on_rinchi_layer_toggled)
         return w
+
+    def _on_rinchi_city_scope_toggled(self, _checked):
+        had_data = self._current_raw_rinchi is not None
+        self._apply_rinchi_city_filter(getattr(self, '_connected_layer', None))
+        # 結果が出ていたなら新スコープで取り直す（_apply_rinchi_city_filter が
+        # _rinchi_scope_dirty を立てるので _search_rinchi 内で force 扱いになる）。
+        if had_data:
+            self._search_rinchi()
+
+    def _apply_rinchi_city_filter(self, layer):
+        """所在市町村コンボを森林クラウド固定リスト（_RINCHI_SHICHOSON）で作り直す。
+        「計画図情報で絞込」チェックONかつ layer が渡された場合は、そのレイヤーの
+        市町村属性に現れる市町村だけに絞る。判定は図形でなく属性の文字列一致:
+          ・市町村名称 …… 固定リストの名前がその値に含まれるか（旧○○を含む乱れた
+                            表記でも拾える）
+          ・市町村CD  …… 既存の現行名テーブル（_CD_CITY）で名前へ変換して一致判定
+        チェックOFF、SHP や市町村属性を持たないレイヤー、一致ゼロ、レイヤー未接続は
+        絞らず全件。"""
+        allowed = None
+        chk = getattr(self, 'chk_rinchi_city_in_layer', None)
+        scope_on = chk is None or chk.isChecked()
+        if scope_on and layer is not None and not sip.isdeleted(layer):
+            fnames = [f.name() for f in layer.fields()]
+            if '市町村名称' in fnames:
+                idx = layer.fields().indexOf('市町村名称')
+                vals = [
+                    str(v) for v in layer.uniqueValues(idx)
+                    if v is not None and str(v) not in ('', 'NULL')
+                ]
+                allowed = {
+                    name for name, _label in _RINCHI_SHICHOSON
+                    if any(name in v for v in vals)
+                }
+            elif '市町村CD' in fnames:
+                idx = layer.fields().indexOf('市町村CD')
+                here = set()
+                for v in layer.uniqueValues(idx):
+                    try:
+                        nm = _CD_CITY.get(int(str(v).strip()), '')
+                    except (TypeError, ValueError):
+                        continue
+                    if nm:
+                        here.add(nm)
+                allowed = {
+                    name for name, _label in _RINCHI_SHICHOSON if name in here
+                }
+            if not allowed:
+                allowed = None
+
+        prev = self.combo_rinchi_city.currentData() or ''
+        self.combo_rinchi_city.blockSignals(True)
+        self.combo_rinchi_city.clear()
+        self.combo_rinchi_city.addItem('（全て）', '')
+        for name, label in _RINCHI_SHICHOSON:
+            if allowed is None or name in allowed:
+                self.combo_rinchi_city.addItem(label, name)
+        if prev:
+            i = self.combo_rinchi_city.findData(prev)
+            if i >= 0:
+                self.combo_rinchi_city.setCurrentIndex(i)
+        self.combo_rinchi_city.blockSignals(False)
+        # 市町村セットが変わった（レイヤー切替・スコープ変更）＝取得済み集計は
+        # 新スコープ外／不足の可能性。破棄し、次回検索は強制再取得にする
+        # （林地開発/all の DB キャッシュもスコープ非依存で汚染し得るため）。
+        if getattr(self, '_current_raw_rinchi', None) is not None:
+            self._current_raw_rinchi = None
+        self._rinchi_scope_dirty = True
 
     # ------------------------------------------------------------------
     # 検索・表示
@@ -133,6 +212,12 @@ class RinchiMixin:
         self.lbl_rinchi_count.setText('検索中...')
         self.btn_rinchi_search.setEnabled(False)
         self._current_rinchi_cache_key = self._RINCHI_ALL_CACHE_KEY
+        # レイヤー切替／スコープ変更後の初回は、スコープ非依存の集計キャッシュを
+        # 使わず取り直す（未取得の市町村を確実に含める）
+        if getattr(self, '_rinchi_scope_dirty', False):
+            force = True
+            save_to_db = True
+            self._rinchi_scope_dirty = False
 
         if not force and self._current_raw_rinchi is not None:
             self.btn_rinchi_search.setEnabled(True)
@@ -316,16 +401,37 @@ class RinchiMixin:
 
     def _display_rinchi_table(self, data):
         records = [r for r in self._extract_records(data) if isinstance(r, dict)]
+        # 「（全て）」は市町村ごとに取得して連結するため、所在市町村欄が現行名と
+        # 旧名の両方を含むレコード（例「旧静岡市、旧美和村」）が現行名の分と旧名の
+        # 分で二重に入る。安定ID（林地開発ID→fid→主要項目の組）で一意化する。
+        _seen = set()
+        _uniq = []
+        for _r in records:
+            _rid = _r.get('林地開発ID') or _r.get('fid')
+            if _rid in (None, ''):
+                _rid = (
+                    str(_r.get('申請者_法人名', '')),
+                    str(_r.get('所在市町村', '')),
+                    str(_r.get('所在地', '')),
+                    str(_r.get('表示用_許可年月日', '')),
+                )
+            if _rid in _seen:
+                continue
+            _seen.add(_rid)
+            _uniq.append(_r)
+        records = _uniq
         city_name = self.combo_rinchi_city.currentData() or ''
         kubun = self.combo_rinchi_kubun.currentData() or ''
         mokuteki = self.combo_rinchi_mokuteki.currentData() or ''
         shozaichi = self.edit_rinchi_shozaichi.text().strip()
 
         if city_name:
-            city_keys = {city_name, _API_CITY_MAP.get(city_name, city_name)}
+            # 森林クラウドのAPIと同じ部分一致。林地開発データの所在市町村欄は
+            # 「旧静岡市、旧美和村」「榛原郡川根本町」「静岡市葵区腰越」等の飾り付きの
+            # ことがあり、完全一致だと取り逃す。
             records = [
                 r for r in records
-                if str(r.get('所在市町村', '') or '') in city_keys
+                if city_name in str(r.get('所在市町村', '') or '')
             ]
         if kubun:
             records = [
@@ -703,7 +809,9 @@ class RinchiMixin:
         shozaichi = self.edit_rinchi_shozaichi.text().strip()
 
         clauses = []
-        if city_name:
+        if city_name and not city_name.startswith('旧'):
+            # 旧市町村区分（旧○○村）は地図レイヤーの city_short（現行市町村名のみ）に
+            # 存在しないので地図側の絞り込みには使わない。表側の絞り込みは別途効く。
             clauses.append(f"\"city_short\" = '{self._escape_sql_value(city_name)}'")
         if kubun:
             clauses.append(f"\"kubun\" = '{self._escape_sql_value(kubun)}'")

@@ -17,7 +17,7 @@ from qgis.core import (
 )
 
 from .constants import (
-    _API_BASE, _API_CITY_MAP,
+    _API_BASE, _API_CITY_MAP, _TOGGLE_BTN_QSS_LAYER,
     _CD_CITY, _SHIZUOKA_BBOX, _KEIKAKU_MVT_ZOOM,
 )
 from .layer_cleanup import remove_project_layer
@@ -94,6 +94,7 @@ class KeikakuMixin:
 
         self.btn_keikaku_layer = QPushButton('計画箇所レイヤー')
         self.btn_keikaku_layer.setCheckable(True)
+        self.btn_keikaku_layer.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         self.btn_keikaku_layer.setToolTip('経営計画作成箇所を市町村別色分けで表示/非表示')
         row.addWidget(self.btn_keikaku_layer)
         v.addLayout(row)
@@ -116,7 +117,7 @@ class KeikakuMixin:
 
         self.btn_keikaku_load.setEnabled(False)
         self.btn_keikaku_layer.setEnabled(False)
-        self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+        self.lbl_keikaku_count.setText('計画図レイヤーを設定してください')
 
         self.btn_keikaku_load.clicked.connect(self._load_keikaku)
         self.btn_keikaku_layer.toggled.connect(self._on_keikaku_layer_toggled)
@@ -133,7 +134,7 @@ class KeikakuMixin:
             self.btn_keikaku_layer.blockSignals(False)
             self.tbl_keikaku.setRowCount(0)
             self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
-            self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+            self.lbl_keikaku_count.setText('計画図レイヤーを設定してください')
             return
 
         self.btn_keikaku_layer.blockSignals(True)

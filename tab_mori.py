@@ -7,7 +7,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QPushButton, QTableWidgetItem,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QTimer
+from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
@@ -20,7 +20,7 @@ from qgis.core import (
 from qgis.gui import QgsVertexMarker
 from qgis.PyQt.QtCore import QVariant
 
-from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST
+from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST, _TOGGLE_BTN_QSS_LAYER
 from .layer_cleanup import remove_project_layer
 
 
@@ -67,6 +67,7 @@ class MoriMixin:
 
         self.btn_mori_layer = QPushButton('実施箇所レイヤー')
         self.btn_mori_layer.setCheckable(True)
+        self.btn_mori_layer.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         self.btn_mori_layer.setToolTip('森の力実施箇所のMVTポリゴンレイヤーを追加/除去')
         row.addWidget(self.btn_mori_layer)
         v.addLayout(row)
@@ -698,22 +699,3 @@ class MoriMixin:
         extent = QgsRectangle(pt.x() - buf, pt.y() - buf, pt.x() + buf, pt.y() + buf)
         canvas.setExtent(extent)
         canvas.refresh()
-
-    # ------------------------------------------------------------------
-    # 全画面トグル
-    # ------------------------------------------------------------------
-
-    def _toggle_mori_fullscreen(self, on):
-        if on:
-            if not self.isFloating():
-                self.setFloating(True)
-            self.showMaximized()
-            # showMaximized() がネイティブウィンドウのオーナー関係を
-            # 再設定してしまうため、次のイベントループで解除し直す
-            QTimer.singleShot(0, self._detach_native_window_owner)
-            self.btn_mori_fullscreen.setText('格納')
-        else:
-            self.showNormal()
-            if self.isFloating():
-                self.setFloating(False)
-            self.btn_mori_fullscreen.setText('全画面')

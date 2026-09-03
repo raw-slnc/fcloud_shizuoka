@@ -8,12 +8,14 @@ from qgis.core import QgsProject
 from .layer_cleanup import remove_project_layer
 
 PLUGIN_DIR = os.path.dirname(__file__)
+_TITLE = '静岡県森林クラウド'
 
 
 class FcloudShizuoka:
     def __init__(self, iface):
         self.iface = iface
-        self.dock = None
+        self.dock = None      # FcloudDockWidget: 薄い格納コンテナ
+        self.window = None    # FcloudWindow: UI 実体
         self.action = None
         self._highlights = []  # プラグインインスタンスをまたいで存続するハイライトリスト
         self._is_shutting_down = False
@@ -35,19 +37,27 @@ class FcloudShizuoka:
         for key in list(sys.modules.keys()):
             if key.startswith('fcloud_shizuoka.'):
                 del sys.modules[key]
-        from .dock_widget import FcloudDockWidget
-        self.dock = FcloudDockWidget(self.iface, highlights=self._highlights)
+        from .dock_widget import FcloudDockWidget, FcloudWindow
+        self.window = FcloudWindow(self.iface, highlights=self._highlights)
+        self.dock = FcloudDockWidget(_TITLE, self.iface.mainWindow())
+        self.dock.setObjectName('FcloudShizuokaDock')
+        self.dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
+        )
+        self.dock.setWidget(self.window)
+        self.window.attach_dock_widget(self.dock)
         self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.dock)
         self.dock.hide()
 
         icon = QIcon(os.path.join(PLUGIN_DIR, 'icon.png'))
-        self.action = QAction(icon, '静岡県森林クラウド', self.iface.mainWindow())
+        self.action = QAction(icon, _TITLE, self.iface.mainWindow())
         self.action.setCheckable(True)
         self.action.triggered.connect(self._toggle_dock)
         self.dock.visibilityChanged.connect(self._on_dock_visibility_changed)
+        self.dock.closed.connect(self._on_dock_closed)
 
         self.iface.addVectorToolBarIcon(self.action)
-        self.iface.addPluginToVectorMenu('静岡県森林クラウド', self.action)
+        self.iface.addPluginToVectorMenu(_TITLE, self.action)
 
         self._remove_stale_layers()
         QgsProject.instance().readProject.connect(self._remove_stale_layers)
@@ -83,26 +93,27 @@ class FcloudShizuoka:
             except (TypeError, RuntimeError):
                 pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         self.iface.removeVectorToolBarIcon(self.action)
-        self.iface.removePluginVectorMenu('静岡県森林クラウド', self.action)
+        self.iface.removePluginVectorMenu(_TITLE, self.action)
         if self.dock:
-            self._shutdown_dock()
+            self._shutdown_window()
             self.iface.mapCanvas().refresh()
             self.iface.removeDockWidget(self.dock)
-            self.dock.deleteLater()
+            self.dock.deleteLater()  # setWidget 済みの window も一緒に破棄される
         self.action = None
         self.dock = None
+        self.window = None
 
-    def _shutdown_dock(self):
-        if self._is_shutting_down or not self.dock:
+    def _shutdown_window(self):
+        if self._is_shutting_down or not self.window:
             return
         self._is_shutting_down = True
         try:
-            self.dock.cleanup_on_unload()
+            self.window.cleanup_on_unload()
         finally:
             self._is_shutting_down = False
 
     def _on_about_to_quit(self):
-        self._shutdown_dock()
+        self._shutdown_window()
 
     def _on_dock_visibility_changed(self, visible):
         """ツールバーのトグルだけでなく、ドック純正の✕ボタンでの非表示も含めて
@@ -110,19 +121,28 @@ class FcloudShizuoka:
         「初回表示」扱いにする（✕ボタンは_toggle_dockを経由しないため、
         ここでリセットしないと接続レイヤーの自動アクティブ化が働かなくなる）。"""
         self.action.setChecked(visible)
-        if not visible:
-            self.dock._first_show = True
+        if not visible and self.window is not None:
+            self.window._first_show = True
+
+    def _on_dock_closed(self):
+        """ドック純正の✕で閉じられたとき（＝明確な終了操作）だけ本格クリーンアップ。"""
+        if self.window is not None:
+            self.window._teardown_visible_state()
+            self.window._first_show = True
 
     def _toggle_dock(self, checked):
-        if checked and self.dock._first_show:
+        w = self.window
+        if w is None:
+            return
+        if checked and w._first_show:
             self.dock.setVisible(True)
-            self.dock._first_show = False
-            self.dock._sync_keikaku_layer_visibility(ensure_loaded=True)
-            layer = self.dock._connected_layer
+            w._first_show = False
+            w._sync_keikaku_layer_visibility(ensure_loaded=True)
+            layer = w._connected_layer
             if layer and not sip.isdeleted(layer):
                 QTimer.singleShot(200, lambda ly=layer: self.iface.layerTreeView().setCurrentLayer(ly))
         elif not checked:
             self.dock.setVisible(False)
         else:
             self.dock.setVisible(True)
-            self.dock._sync_keikaku_layer_visibility(ensure_loaded=True)
+            w._sync_keikaku_layer_visibility(ensure_loaded=True)
