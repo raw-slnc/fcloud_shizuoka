@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sip
+from qgis.PyQt import sip
 
 
 def _detach_layers_from_snapping(project, layers):

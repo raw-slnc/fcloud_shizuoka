@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 import math
-import sip
+from qgis.PyQt import sip
 import struct
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame, QPushButton,
+    QHeaderView, QFrame, QPushButton, QAbstractItemView,
 )
 from qgis.PyQt.QtCore import Qt, QObject, QEvent
 from qgis.core import (
@@ -14,8 +14,8 @@ from qgis.core import (
 )
 
 from .constants import (
-    _API_BASE,
-    _PRIMARY_FIELDS, _HISTORY_FIELDS,
+    _API_BASE, _TOGGLE_BTN_QSS_ONOFF,
+    _PRIMARY_FIELDS, _HISTORY_FIELDS, _MORINBO_OLD_CD_TO_CITY,
 )
 
 class _ShiftScrollFilter(QObject):
@@ -25,8 +25,8 @@ class _ShiftScrollFilter(QObject):
         self._table = table
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Wheel:
-            if event.modifiers() & Qt.ShiftModifier:
+        if event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 sb = self._table.horizontalScrollBar()
                 sb.setValue(sb.value() - event.angleDelta().y())
                 return True
@@ -88,29 +88,31 @@ class ShinrinboMixin:
     def _build_tab_shinrinbo(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 4, 0, 0)
         v.setSpacing(4)
 
         row = QHBoxLayout()
         row.addStretch(1)
         self.btn_kozu_shinrinbo = QPushButton('公図連携OFF')
         self.btn_kozu_shinrinbo.setCheckable(True)
-        self.btn_kozu_shinrinbo.setToolTip('ONにすると小班選択のたびに自動でkozu_xml_integratorへ送信')
+        self.btn_kozu_shinrinbo.setStyleSheet(_TOGGLE_BTN_QSS_ONOFF)
+        # 幅は広い方（公図連携OFF）で固定して ON/OFF 切替で伸縮させない
+        self.btn_kozu_shinrinbo.setFixedWidth(self.btn_kozu_shinrinbo.sizeHint().width())
+        self.btn_kozu_shinrinbo.setToolTip('ONにすると小班選択のたびに自動で Kozu XML Integrator へ送信')
         row.addWidget(self.btn_kozu_shinrinbo)
         self._update_kozu_btn(self.btn_kozu_shinrinbo)
         v.addLayout(row)
 
         self.tbl_shinrinbo = QTableWidget(0, 0)
-        self.tbl_shinrinbo.setSelectionBehavior(QTableWidget.SelectRows)
-        self.tbl_shinrinbo.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.tbl_shinrinbo.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_shinrinbo.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_shinrinbo.setAlternatingRowColors(True)
-        self.tbl_shinrinbo.setFrameShape(QFrame.NoFrame)
+        self.tbl_shinrinbo.setFrameShape(QFrame.Shape.NoFrame)
         self.tbl_shinrinbo.setStyleSheet(
-            'QTableWidget { border: 1px solid palette(mid); }')
-        self.tbl_shinrinbo.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
-        self.tbl_shinrinbo.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
+            'QTableWidget { border: 1px solid palette(dark); }')
+        self.tbl_shinrinbo.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.tbl_shinrinbo.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         hdr = self.tbl_shinrinbo.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setStretchLastSection(False)
         self.tbl_shinrinbo.verticalHeader().setVisible(False)
         self.tbl_shinrinbo.viewport().installEventFilter(
@@ -152,7 +154,7 @@ class ShinrinboMixin:
                     ]
             self._shinrinbo_col_map = col_map
 
-        elif self._layer_type == 'cd_gpkg':
+        elif self._layer_type in ('cd_gpkg', 'shp'):
             self._shinrinbo_col_map = list(_API_TABLE_COLS)
 
         else:
@@ -495,8 +497,8 @@ class ShinrinboMixin:
                     if v is not None and str(v) not in ('NULL',):
                         val = str(v)
                 item = QTableWidgetItem(val)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setData(Qt.UserRole, feat)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setData(Qt.ItemDataRole.UserRole, feat)
                 self.tbl_shinrinbo.setItem(row, col, item)
 
         self.tbl_shinrinbo.clearSelection()
@@ -512,8 +514,8 @@ class ShinrinboMixin:
                 if '年度' in src and text == '0':
                     text = ''
                 item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                item.setData(Qt.UserRole, d)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setData(Qt.ItemDataRole.UserRole, d)
                 self.tbl_shinrinbo.setItem(row, col, item)
 
         self.tbl_shinrinbo.clearSelection()
@@ -534,7 +536,7 @@ class ShinrinboMixin:
             self._clear_cloud_record_info()
             return
         self._show_cloud_table_row_info('森林簿', self.tbl_shinrinbo, row)
-        row_data = item.data(Qt.UserRole)
+        row_data = item.data(Qt.ItemDataRole.UserRole)
         if row_data is None:
             return
 
@@ -558,6 +560,16 @@ class ShinrinboMixin:
         if self._layer_type == 'gpkg':
             feat = row_data
             fnames = feat.fields().names()
+            city  = str(feat['市町村名称'] or '').strip() if '市町村名称' in fnames else ''
+            # 旧市町村区分（旧井川村・旧静岡市… の飾り付き表記）は市町村CDで
+            # 現行市名へ変換してから Kozu へ渡す。表に無いCDは市町村名称のまま。
+            if '市町村CD' in fnames:
+                try:
+                    _cur = _MORINBO_OLD_CD_TO_CITY.get(int(str(feat['市町村CD']).strip()))
+                except (TypeError, ValueError):
+                    _cur = None
+                if _cur:
+                    city = _cur
             daiji = str(feat['大字名称']  or '').strip() if '大字名称'  in fnames else ''
             oban  = str(feat['地番_親番'] or '').strip() if '地番_親番' in fnames else ''
             eda   = str(feat['地番_枝番'] or '').strip() if '地番_枝番' in fnames else ''
@@ -565,12 +577,13 @@ class ShinrinboMixin:
             chiban = f'{oban}-{eda}' if eda and eda != '0' else oban
         else:
             d = row_data or {}
+            city  = str(d.get('市町村', '') or '').strip()
             daiji = str(d.get('大字', '') or '').strip()
             # 表示用_地番は既に「親番-枝番」形式で提供されるためそのまま使用
             chiban = str(d.get('表示用_地番', '') or '').strip()
 
         if chiban:
-            self._send_to_kozu(daiji, chiban)
+            self._send_to_kozu(city, daiji, chiban)
 
     # ------------------------------------------------------------------
     # ヘルパー

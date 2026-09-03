@@ -1,28 +1,27 @@
 # -*- coding: utf-8 -*-
 import json
 import os
-import sip
-import sys
+from qgis.PyQt import sip
 import urllib.parse
 
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QTabWidget, QTextBrowser,
-    QPushButton, QFrame, QMessageBox,
+    QPushButton, QFrame, QMessageBox, QCheckBox,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer
+from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
     QgsProject, QgsVectorLayer,
     QgsNetworkAccessManager, QgsCoordinateTransform, QgsWkbTypes,
-    QgsLayerTreeLayer,
+    QgsLayerTreeLayer, QgsFeatureRequest,
 )
 from qgis.gui import QgsRubberBand
 
 from .cache_db import CacheDB
 from .constants import (
-    _API_BASE, _CITY_TO_NORIN,
+    _API_BASE, _CITY_TO_NORIN, _TOGGLE_BTN_QSS_LAYER,
     _PRIMARY_FIELDS, _HISTORY_FIELDS,
     _CD_API_PRIMARY_FIELDS, _CD_API_HISTORY_FIELDS,
 )
@@ -38,12 +37,28 @@ _HL_SEL_BORDER = QColor(210,  30,  30, 220)
 _HL_SEL_FILL   = QColor(210,  30,  30,  25)
 
 
-class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QDockWidget):
+class FcloudDock(QDockWidget):
+    """QGIS 格納用の薄いドックコンテナ。ネイティブ floating は使わず
+    Closable / Movable のみを許可する（フロート⇔格納の状態遷移で Windows/Qt6 に
+    透過残像バグがあるため。別ウィンドウ表示は QDialog 側で行う）。"""
+
+    closed = pyqtSignal()
+
+    def closeEvent(self, event):
+        # ドック純正の ✕ ボタン経由のみ発火（ツールバートグルは setVisible(False) で
+        # closeEvent を経由しない）。プラグイン側で本格的なクリーンアップに使う。
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QWidget):
     _TAB_ORDER_VERSION = 2
 
     def __init__(self, iface, highlights=None, parent=None):
-        super().__init__('静岡県森林クラウド', parent or iface.mainWindow())
+        super().__init__(parent)
         self.iface = iface
+        self._window_mode_callback = None
+        self._suspend_hide_cleanup = False
 
         # 全タブ共有の状態変数
         self._connected_layer        = None
@@ -52,6 +67,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._sel_mode_orig          = None  # 変更前のselectionRenderingMode（復元用）
         self._hoanrin_highlights     = highlights if highlights is not None else []
         self._selection_highlights   = []
+        self._expanding_selection    = False  # 重なり地物の自動追加中フラグ（selectionChanged 再帰防止）
+        self._clicked_fid            = None   # 直近に地図でクリックした地物 fid（左パネル表示の先頭固定用）
         self._mori_markers           = []
         self._pending_replies        = []
         self._current_raw_hoanrin    = None
@@ -96,64 +113,38 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._layer_refresh_timer.setSingleShot(True)
         self._layer_refresh_timer.timeout.connect(self._refresh_layer_combo)
 
-        self.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
-        )
         self._build_ui()
         self._remove_rinchi_layers()
         self._connect_project_signals()
-        self.topLevelChanged.connect(self._sync_floating_window_flags)
 
     # ------------------------------------------------------------------
-    # フロート時にAlt+Tabで個別に切り替えられるようにする
+    # コンテナ（ドック / 別ウィンドウ）切り替え
     # ------------------------------------------------------------------
 
-    def _sync_floating_window_flags(self, is_floating):
-        """フロート時は通常のトップレベルウィンドウ扱いにし、Alt+Tabで個別対象にする。"""
-        if is_floating:
-            geometry = self.geometry()
-            self.setWindowFlag(Qt.WindowType.Tool, False)
-            self.setWindowFlag(Qt.WindowType.Window, True)
-            self.show()
-            if geometry.isValid():
-                self.setGeometry(geometry)
-            self._detach_native_window_owner()
+    def set_window_mode_callback(self, callback):
+        self._window_mode_callback = callback
 
-        if hasattr(self, 'btn_mori_fullscreen') and self.btn_mori_fullscreen.isChecked() != is_floating:
-            self.btn_mori_fullscreen.setChecked(is_floating)
+    def set_window_mode_checked(self, checked):
+        self.chk_separate_window.blockSignals(True)
+        self.chk_separate_window.setChecked(checked)
+        self.chk_separate_window.blockSignals(False)
 
-    def _detach_native_window_owner(self):
-        """QtがメインウィンドウをオーナーにセットするHWNDを解除する（Windowsはowned windowをAlt+Tabから除外するため）。"""
-        if not sys.platform.startswith('win'):
-            return
-        try:
-            import ctypes
+    def set_hide_cleanup_suspended(self, suspended):
+        self._suspend_hide_cleanup = suspended
 
-            user32 = ctypes.windll.user32
-            set_long_ptr = getattr(user32, 'SetWindowLongPtrW', user32.SetWindowLongW)
-            get_long_ptr = getattr(user32, 'GetWindowLongPtrW', user32.GetWindowLongW)
-            hwnd = int(self.winId())
-            gwlp_hwndparent = -8
-            gwl_exstyle = -20
-            ws_ex_appwindow = 0x00040000
-            ws_ex_toolwindow = 0x00000080
-            swp_flags = 0x0001 | 0x0002 | 0x0004 | 0x0020  # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
-
-            set_long_ptr(hwnd, gwlp_hwndparent, 0)
-            ex_style = get_long_ptr(hwnd, gwl_exstyle)
-            ex_style = (ex_style | ws_ex_appwindow) & ~ws_ex_toolwindow
-            set_long_ptr(hwnd, gwl_exstyle, ex_style)
-            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, swp_flags)
-        except (OSError, AttributeError, ValueError):
-            pass
+    def _on_window_mode_toggled(self, checked):
+        if self._window_mode_callback is not None:
+            self._window_mode_callback(checked)
 
     # ------------------------------------------------------------------
     # UI 構築
     # ------------------------------------------------------------------
 
     def _build_ui(self):
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
         root = QWidget()
-        self.setWidget(root)
+        _outer.addWidget(root)
         main = QHBoxLayout(root)
         main.setContentsMargins(4, 4, 4, 4)
         main.setSpacing(4)
@@ -167,7 +158,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         left_v.setSpacing(4)
 
         row_a = QHBoxLayout()
-        row_a.addWidget(QLabel('GPKGレイヤー:'))
+        row_a.addWidget(QLabel('計画図レイヤー:'))
         self.layer_combo = QComboBox()
         row_a.addWidget(self.layer_combo, 1)
         left_v.addLayout(row_a)
@@ -181,7 +172,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.info_browser = QTextBrowser()
         self.info_browser.setOpenExternalLinks(False)
         selected_v.addWidget(self.info_browser, 1)
-        self.lbl_selected = QLabel('GPKGレイヤーで選択してください')
+        self.lbl_selected = QLabel('計画図レイヤーで選択してください')
         self.lbl_selected.setStyleSheet('font-weight: bold; padding: 2px;')
         selected_v.addWidget(self.lbl_selected)
         self.left_tab.addTab(selected_tab, '選択中の小班')
@@ -201,19 +192,19 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         _help_lbl = QLabel('<a href="#">マニュアル</a>')
         _help_lbl.setStyleSheet('font-size: 11px; padding-right: 4px; padding-bottom: 4px;')
         _help_lbl.linkActivated.connect(lambda _: self._open_manual())
-        self.left_tab.setCornerWidget(_help_lbl, Qt.TopRightCorner)
+        self.left_tab.setCornerWidget(_help_lbl, Qt.Corner.TopRightCorner)
 
         left_v.addWidget(self.left_tab, 1)
 
         _credit_lbl = QLabel('Developed by Avid Tree Work')
         _credit_lbl.setStyleSheet('color: gray; font-size: 10px;')
-        _credit_lbl.setAlignment(Qt.AlignLeft)
+        _credit_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
         left_v.addWidget(_credit_lbl)
 
         main.addWidget(left_w)
 
         sep = QFrame()
-        sep.setFrameShape(QFrame.NoFrame)
+        sep.setFrameShape(QFrame.Shape.NoFrame)
         sep.setFixedWidth(1)
         main.addWidget(sep)
 
@@ -231,15 +222,14 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.cloud_tab.addTab(self._build_tab_keikaku(),   '経営計画')
         self.cloud_tab.addTab(self._build_tab_rinchi(),    '林地開発')
 
-        self.btn_mori_fullscreen = QPushButton('全画面')
-        self.btn_mori_fullscreen.setCheckable(True)
-        self.btn_mori_fullscreen.setToolTip('全画面 / 格納')
-        self.btn_mori_fullscreen.toggled.connect(self._toggle_mori_fullscreen)
+        self.chk_separate_window = QCheckBox('別ウィンドウ')
+        self.chk_separate_window.setToolTip('パネルを QGIS 本体から独立した別ウィンドウで表示する')
+        self.chk_separate_window.toggled.connect(self._on_window_mode_toggled)
         _corner_w = QWidget()
         _corner_l = QHBoxLayout(_corner_w)
         _corner_l.setContentsMargins(0, 3, 0, 3)
-        _corner_l.addWidget(self.btn_mori_fullscreen)
-        self.cloud_tab.setCornerWidget(_corner_w, Qt.TopRightCorner)
+        _corner_l.addWidget(self.chk_separate_window)
+        self.cloud_tab.setCornerWidget(_corner_w, Qt.Corner.TopRightCorner)
 
         right_v.addWidget(self.cloud_tab, 1)
 
@@ -253,7 +243,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.btn_rindo = QPushButton('林道')
         self.btn_rindo.setCheckable(True)
         self.btn_rindo.setToolTip('林道 MVT レイヤーを追加/除去')
-        self.btn_rindo.setStyleSheet(_btn_style)
+        self.btn_rindo.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         bottom_row.addWidget(self.btn_rindo)
         bottom_row.addStretch()
 
@@ -313,7 +303,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         w = QWidget()
         v = QVBoxLayout(w)
         lbl = QLabel('森林クラウド側未実装')
-        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setStyleSheet('color: gray; font-size: 13px; padding: 20px;')
         v.addWidget(lbl)
         return w
@@ -323,22 +313,22 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
     # ------------------------------------------------------------------
 
     def _make_table(self, headers):
-        from qgis.PyQt.QtWidgets import QTableWidget, QHeaderView, QFrame
+        from qgis.PyQt.QtWidgets import QTableWidget, QHeaderView, QFrame, QAbstractItemView
         t = QTableWidget(0, len(headers))
         t.setHorizontalHeaderLabels(headers)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        t.setSelectionBehavior(QTableWidget.SelectRows)
-        t.setEditTriggers(QTableWidget.NoEditTriggers)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         t.setAlternatingRowColors(True)
         # Dock の端でネイティブ枠線が見切れることがあるため、表の外枠を明示する。
-        t.setFrameShape(QFrame.NoFrame)
-        t.setStyleSheet('QTableWidget { border: 1px solid palette(mid); }')
+        t.setFrameShape(QFrame.Shape.NoFrame)
+        t.setStyleSheet('QTableWidget { border: 1px solid palette(dark); }')
         return t
 
     def _post_api(self, url, params, callback):
         body = QByteArray(urllib.parse.urlencode(params).encode('utf-8'))
         req = QNetworkRequest(QUrl(url))
-        req.setHeader(QNetworkRequest.ContentTypeHeader,
+        req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader,
                       'application/x-www-form-urlencoded')
         req.setRawHeader(b'Accept', b'application/json, text/plain, */*')
         req.setRawHeader(b'Origin', b'https://fcloud.pref.shizuoka.jp')
@@ -361,7 +351,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _handle_binary_reply(self, reply, callback):
         data = None
-        if reply.error() == QNetworkReply.NoError:
+        if reply.error() == QNetworkReply.NetworkError.NoError:
             data = bytes(reply.readAll())
         else:
             print(f'[fcloud_shizuoka] MVT error: {reply.errorString()}')
@@ -421,7 +411,7 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def _handle_reply(self, reply, callback):
         data = None
-        if reply.error() == QNetworkReply.NoError:
+        if reply.error() == QNetworkReply.NetworkError.NoError:
             try:
                 data = json.loads(bytes(reply.readAll()).decode('utf-8'))
             except Exception as e:
@@ -822,11 +812,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
         layer_id = self.layer_combo.currentData()
         if not layer_id:
-            self.combo_hoanrin_city.clear()
-            self.combo_rinchi_city.blockSignals(True)
-            self.combo_rinchi_city.clear()
-            self.combo_rinchi_city.addItem('（全て）', '')
-            self.combo_rinchi_city.blockSignals(False)
+            self._apply_hoanrin_city_filter(None)
+            self._apply_rinchi_city_filter(None)
         else:
             QSettings().setValue('fcloud_shizuoka/layer_id', layer_id)
             layer = QgsProject.instance().mapLayer(layer_id)
@@ -845,7 +832,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 else:
                     self._layer_type = 'shp'
                 self._init_shinrinbo_headers()
-                self._refresh_city_combo(layer)
+                self._apply_hoanrin_city_filter(layer)
+                self._apply_rinchi_city_filter(layer)
         self._update_keikaku_load_btn()
 
     # ------------------------------------------------------------------
@@ -888,56 +876,10 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self._sel_color_orig = None
         self._sel_mode_orig = None
 
-    def _refresh_city_combo(self, layer):
-        from .constants import _API_CITY_MAP, _CD_CITY
-
-        if '市町村名称' in [f.name() for f in layer.fields()]:
-            idx = layer.fields().indexOf('市町村名称')
-            cities = sorted(
-                str(v) for v in layer.uniqueValues(idx)
-                if v is not None and str(v) not in ('NULL', '')
-            )
-        elif '市町村CD' in [f.name() for f in layer.fields()]:
-            idx = layer.fields().indexOf('市町村CD')
-            raw = []
-            for v in layer.uniqueValues(idx):
-                if v is None or str(v) in ('NULL', ''):
-                    continue
-                try:
-                    api_name = _CD_CITY.get(int(str(v).strip()), '')
-                except ValueError:
-                    continue
-                if api_name:
-                    raw.append(_API_CITY_MAP.get(api_name, api_name))
-            cities = sorted(raw)
-        else:
-            return
-
-        current = self.combo_hoanrin_city.currentText()
-        self.combo_hoanrin_city.blockSignals(True)
-        self.combo_hoanrin_city.clear()
-        for city in cities:
-            self.combo_hoanrin_city.addItem(city)
-        if current:
-            i = self.combo_hoanrin_city.findText(current)
-            if i >= 0:
-                self.combo_hoanrin_city.setCurrentIndex(i)
-        self.combo_hoanrin_city.blockSignals(False)
-        self._on_hoanrin_city_changed(self.combo_hoanrin_city.currentText())
-
-        from .constants import _API_CITY_MAP
-        prev = self.combo_rinchi_city.currentData() or ''
-        self.combo_rinchi_city.blockSignals(True)
-        self.combo_rinchi_city.clear()
-        self.combo_rinchi_city.addItem('（全て）', '')
-        for city in cities:
-            display_name = _API_CITY_MAP.get(city, city)
-            self.combo_rinchi_city.addItem(display_name, city)
-        if prev:
-            i = self.combo_rinchi_city.findData(prev)
-            if i >= 0:
-                self.combo_rinchi_city.setCurrentIndex(i)
-        self.combo_rinchi_city.blockSignals(False)
+    # 市町村コンボは接続レイヤーの属性からは作らない:
+    #   ・保安林: _apply_hoanrin_city_filter（現行市町村の固定リスト）
+    #   ・林地開発: _apply_rinchi_city_filter（森林クラウドの固定リスト）
+    # どちらも「計画図情報で絞込」ONのときだけレイヤーに出る市町村へ絞る。
 
     # ------------------------------------------------------------------
     # 選択小班 → 情報表示
@@ -947,9 +889,21 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         if not self._connected_layer or sip.isdeleted(self._connected_layer):
             self._connected_layer = None
             return
+        if not self._expanding_selection:
+            seeds = list(selected_ids) if selected_ids else self._connected_layer.selectedFeatureIds()
+            if selected_ids:
+                # 展開すると getSelectedFeatures() は fid 順になり先頭が変わるため、
+                # クリックした地物を左パネル表示用に覚えておく
+                self._clicked_fid = seeds[0] if seeds else None
+            if self._expand_selection_to_overlapping(seeds):
+                # selectByIds が selectionChanged を同期再発火し、その中で最終状態を処理済み
+                return
         features = list(self._connected_layer.getSelectedFeatures())
+        cf = self._clicked_fid
+        if cf is not None and len(features) > 1:
+            features.sort(key=lambda f: 0 if f.id() == cf else 1)
         if not features:
-            self.lbl_selected.setText('GPKGレイヤーで選択してください')
+            self.lbl_selected.setText('計画図レイヤーで選択してください')
             self.info_browser.clear()
             self._refresh_shinrinbo_tab([])
             return
@@ -972,16 +926,50 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         self.left_tab.setCurrentIndex(0)
         self._refresh_shinrinbo_tab(features)
 
-    def _show_feature_info(self, feat):
-        if self._layer_type == 'shp':
-            self.info_browser.setHtml(
-                '<p style="color:gray;padding:8px;line-height:1.6;">'
-                '計画図SHPレイヤーのため森林属性は表示されません。<br>'
-                'Shinrinbo Code Converter で森林簿と結合したGPKGを作成すると'
-                '詳細属性が表示されます。</p>'
-            )
+    # ------------------------------------------------------------------
+    # 重なり地物の自動追加選択（地点包含ベース）
+    # ------------------------------------------------------------------
+
+    def _expand_selection_to_overlapping(self, seed_ids):
+        """選択された地物の「内部の一点」を覆う他地物をすべて選択に追加する。
+        同じ位置に重なっている小班は QGIS 標準のクリック選択では最前面の1件しか
+        取れず、下の小班の森林簿が参照できないため。形状の一致ではなく
+        「その地点に重なっているか」で判定する（点包含なのでデジタイズの
+        わずかな差では取りこぼさず、形が違う重なりも拾える）。"""
+        layer = self._connected_layer
+        if not seed_ids:
             return
-        if self._layer_type == 'cd_gpkg':
+        current = set(layer.selectedFeatureIds())
+        want = set(current)
+        for feat in layer.getFeatures(QgsFeatureRequest().setFilterFids(list(seed_ids))):
+            g = feat.geometry()
+            if g is None or g.isEmpty():
+                continue
+            pt = g.pointOnSurface()
+            if pt is None or pt.isEmpty():
+                pt = g.centroid()
+            if pt is None or pt.isEmpty():
+                continue
+            req = QgsFeatureRequest().setFilterRect(g.boundingBox())
+            req.setNoAttributes()
+            for cand in layer.getFeatures(req):
+                cid = cand.id()
+                if cid in want:
+                    continue
+                cg = cand.geometry()
+                if cg is not None and not cg.isEmpty() and cg.contains(pt):
+                    want.add(cid)
+        if want != current:
+            self._expanding_selection = True
+            try:
+                layer.selectByIds(list(want))
+            finally:
+                self._expanding_selection = False
+            return True
+        return False
+
+    def _show_feature_info(self, feat):
+        if self._layer_type in ('cd_gpkg', 'shp'):
             self.info_browser.setHtml(
                 '<p style="color:gray;padding:8px;">小班ID解決中...</p>'
             )
@@ -1085,9 +1073,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
         if src_crs and src_crs != dst_crs:
             g.transform(QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance()))
         geom_type = g.type()
-        rb_type = (QgsWkbTypes.PolygonGeometry if geom_type == 2
-                   else QgsWkbTypes.LineGeometry if geom_type == 1
-                   else QgsWkbTypes.PointGeometry)
+        rb_type = (QgsWkbTypes.GeometryType.PolygonGeometry if geom_type == 2
+                   else QgsWkbTypes.GeometryType.LineGeometry if geom_type == 1
+                   else QgsWkbTypes.GeometryType.PointGeometry)
         rb = QgsRubberBand(canvas, rb_type)
         rb.setColor(_HL_SEL_BORDER)
         rb.setFillColor(_HL_SEL_FILL)
@@ -1128,6 +1116,8 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def showEvent(self, event):
         super().showEvent(event)
+        if self._suspend_hide_cleanup:
+            return  # コンテナ（ドック⇔別ウィンドウ）切り替え中の一時的な show は無視
         if self._connected_layer is not None and not sip.isdeleted(self._connected_layer):
             if self._sel_color_layer_id is None:
                 self._apply_selection_color(self._connected_layer)
@@ -1136,9 +1126,13 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        if self._suspend_hide_cleanup:
+            return  # コンテナ切り替え中の一時的な hide は無視
         self._disconnect_selection_signal()
 
-    def closeEvent(self, event):
+    def _teardown_visible_state(self):
+        """ドック純正 ✕ / 別ウィンドウのクローズ時に、選択色・ハイライト・
+        プラグイン生成レイヤー・保留リクエストを片付ける。"""
         self._restore_selection_color()
         self._clear_hoanrin_highlights()
         self._clear_selection_highlights()
@@ -1149,6 +1143,9 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
                 reply.abort()
             except RuntimeError:
                 pass  # 終了処理中に既に削除済みのreplyへのabort()は無視してよい
+
+    def closeEvent(self, event):
+        self._teardown_visible_state()
         super().closeEvent(event)
 
     def cleanup_on_unload(self):
@@ -1156,13 +1153,4 @@ class FcloudDockWidget(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinr
             QgsProject.instance().readProject.disconnect(self._on_project_read)
         except (TypeError, RuntimeError):
             pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
-        self._restore_selection_color()
-        self._clear_hoanrin_highlights()
-        self._clear_selection_highlights()
-        self._clear_mori_markers()
-        self._cleanup_plugin_layers()
-        for reply in list(self._pending_replies):
-            try:
-                reply.abort()
-            except RuntimeError:
-                pass  # 終了処理中に既に削除済みのreplyへのabort()は無視してよい
+        self._teardown_visible_state()

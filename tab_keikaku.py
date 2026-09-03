@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
 import colorsys
-import sip
+from qgis.PyQt import sip
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTableWidgetItem, QHeaderView, QComboBox,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QVariant
+from qgis.PyQt.QtCore import Qt, QUrl, QMetaType
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 
 from qgis.core import (
@@ -17,7 +17,7 @@ from qgis.core import (
 )
 
 from .constants import (
-    _API_BASE, _API_CITY_MAP,
+    _API_BASE, _API_CITY_MAP, _TOGGLE_BTN_QSS_LAYER,
     _CD_CITY, _SHIZUOKA_BBOX, _KEIKAKU_MVT_ZOOM,
 )
 from .layer_cleanup import remove_project_layer
@@ -94,6 +94,7 @@ class KeikakuMixin:
 
         self.btn_keikaku_layer = QPushButton('計画箇所レイヤー')
         self.btn_keikaku_layer.setCheckable(True)
+        self.btn_keikaku_layer.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         self.btn_keikaku_layer.setToolTip('経営計画作成箇所を市町村別色分けで表示/非表示')
         row.addWidget(self.btn_keikaku_layer)
         v.addLayout(row)
@@ -104,7 +105,7 @@ class KeikakuMixin:
         ])
         hdr = self.tbl_keikaku.horizontalHeader()
         for col in range(1, 8):
-            hdr.setSectionResizeMode(col, QHeaderView.Fixed)
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             self.tbl_keikaku.setColumnWidth(col, 75)
         v.addWidget(self.tbl_keikaku, 1)
 
@@ -116,7 +117,7 @@ class KeikakuMixin:
 
         self.btn_keikaku_load.setEnabled(False)
         self.btn_keikaku_layer.setEnabled(False)
-        self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+        self.lbl_keikaku_count.setText('計画図レイヤーを設定してください')
 
         self.btn_keikaku_load.clicked.connect(self._load_keikaku)
         self.btn_keikaku_layer.toggled.connect(self._on_keikaku_layer_toggled)
@@ -133,7 +134,7 @@ class KeikakuMixin:
             self.btn_keikaku_layer.blockSignals(False)
             self.tbl_keikaku.setRowCount(0)
             self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
-            self.lbl_keikaku_count.setText('GPKGレイヤーを設定してください')
+            self.lbl_keikaku_count.setText('計画図レイヤーを設定してください')
             return
 
         self.btn_keikaku_layer.blockSignals(True)
@@ -284,7 +285,7 @@ class KeikakuMixin:
             ]
             for col, v in enumerate(vals):
                 item = QTableWidgetItem(' ' + v)
-                item.setData(Qt.UserRole, rec)
+                item.setData(Qt.ItemDataRole.UserRole, rec)
                 self.tbl_keikaku.setItem(row_i, col, item)
         self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')
         self.lbl_keikaku_count.setText(f'{len(records)}件')
@@ -374,7 +375,7 @@ class KeikakuMixin:
 
     def _on_keikaku_mvt_tile(self, reply, tile_x, tile_y):
         from .mvt_loader import parse_tile
-        if reply.error() == QNetworkReply.NoError:
+        if reply.error() == QNetworkReply.NetworkError.NoError:
             raw = bytes(reply.readAll())
             try:
                 feats = parse_tile(raw, tile_x, tile_y, _KEIKAKU_MVT_ZOOM)
@@ -402,8 +403,8 @@ class KeikakuMixin:
         layer = QgsVectorLayer('Polygon?crs=EPSG:4326', 'fcloud_経営計画作成箇所', 'memory')
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField('市町村cd', QVariant.Int),
-            QgsField('市町村名', QVariant.String),
+            QgsField('市町村cd', QMetaType.Type.Int),
+            QgsField('市町村名', QMetaType.Type.QString),
         ])
         layer.updateFields()
 
@@ -522,7 +523,7 @@ class KeikakuMixin:
             self._clear_cloud_record_info()
             return
         row = rows[0].row()
-        rec = item.data(Qt.UserRole)
+        rec = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(rec, dict):
             self._clear_cloud_record_info()
             return

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
 import colorsys
-import sip
+from qgis.PyQt import sip
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QComboBox, QLabel, QPushButton, QTableWidgetItem,
+    QComboBox, QLabel, QPushButton, QTableWidgetItem, QHeaderView,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QTimer
+from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
@@ -18,9 +18,9 @@ from qgis.core import (
     QgsNetworkAccessManager,
 )
 from qgis.gui import QgsVertexMarker
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QMetaType
 
-from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST
+from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST, _TOGGLE_BTN_QSS_LAYER
 from .layer_cleanup import remove_project_layer
 
 
@@ -58,7 +58,7 @@ class MoriMixin:
         row.addWidget(QLabel('整備者:'))
         self.combo_mori_seibi = QComboBox()
         self.combo_mori_seibi.setEditable(True)
-        self.combo_mori_seibi.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_mori_seibi.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.combo_mori_seibi.addItem('（全て）', '')
         self.combo_mori_seibi.setEnabled(False)
         row.addWidget(self.combo_mori_seibi, 2)
@@ -67,6 +67,7 @@ class MoriMixin:
 
         self.btn_mori_layer = QPushButton('実施箇所レイヤー')
         self.btn_mori_layer.setCheckable(True)
+        self.btn_mori_layer.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         self.btn_mori_layer.setToolTip('森の力実施箇所のMVTポリゴンレイヤーを追加/除去')
         row.addWidget(self.btn_mori_layer)
         v.addLayout(row)
@@ -74,10 +75,10 @@ class MoriMixin:
         self.tbl_mori = self._make_table(
             ['農林事務所', '年度', 'モデル林', '整備者住所', '整備者名', '整備者代表', '総面積(ha)', '所在地', '林小班'])
         hdr = self.tbl_mori.horizontalHeader()
-        hdr.setSectionResizeMode(0, hdr.Fixed)
-        hdr.setSectionResizeMode(1, hdr.Fixed)
-        hdr.setSectionResizeMode(2, hdr.Fixed)
-        hdr.setSectionResizeMode(6, hdr.Fixed)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         self.tbl_mori.setColumnWidth(0, 130)
         self.tbl_mori.setColumnWidth(1, 90)
         self.tbl_mori.setColumnWidth(2, 60)
@@ -219,7 +220,7 @@ class MoriMixin:
             ]
             for col, v in enumerate(vals):
                 item = QTableWidgetItem(' ' + v)
-                item.setData(Qt.UserRole, rec)
+                item.setData(Qt.ItemDataRole.UserRole, rec)
                 self.tbl_mori.setItem(row_i, col, item)
 
         self.lbl_mori_count.setText(f'{total}件')
@@ -353,7 +354,7 @@ class MoriMixin:
                 self._pending_replies.remove(reply)
             reply.deleteLater()
             return
-        if reply.error() == QNetworkReply.NoError:
+        if reply.error() == QNetworkReply.NetworkError.NoError:
             raw = bytes(reply.readAll())
             try:
                 feats = parse_tile(raw, tile_x, tile_y, _MORI_MVT_ZOOM, 'MAGIS.MORI_NO_CHIKARA')
@@ -374,12 +375,12 @@ class MoriMixin:
         layer = QgsVectorLayer('Polygon?crs=EPSG:4326', 'fcloud_森の力実施箇所', 'memory')
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField('管理番号',   QVariant.String),
-            QgsField('事業区分',   QVariant.String),
-            QgsField('詳細区分',   QVariant.String),
-            QgsField('年度',       QVariant.String),
-            QgsField('農林事務所', QVariant.String),
-            QgsField('整備者名',   QVariant.String),
+            QgsField('管理番号',   QMetaType.Type.QString),
+            QgsField('事業区分',   QMetaType.Type.QString),
+            QgsField('詳細区分',   QMetaType.Type.QString),
+            QgsField('年度',       QMetaType.Type.QString),
+            QgsField('農林事務所', QMetaType.Type.QString),
+            QgsField('整備者名',   QMetaType.Type.QString),
         ])
         layer.updateFields()
 
@@ -476,7 +477,7 @@ class MoriMixin:
                     except Exception as e:
                         QgsMessageLog.logMessage(
                             f'[fcloud] mori geometry combine failed for {kanri}: {e}',
-                            level=Qgis.Warning)
+                            level=Qgis.MessageLevel.Warning)
             if not geom or geom.isEmpty():
                 continue
             qf = QgsFeature(layer.fields())
@@ -594,7 +595,7 @@ class MoriMixin:
             self._clear_cloud_record_info()
             return
         row = rows[0].row()
-        rec = item.data(Qt.UserRole)
+        rec = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(rec, dict):
             self._clear_cloud_record_info()
             return
@@ -635,7 +636,7 @@ class MoriMixin:
                 except Exception as e:
                     QgsMessageLog.logMessage(
                         f'[fcloud] mori bbox unaryUnion failed: {e}',
-                        level=Qgis.Warning)
+                        level=Qgis.MessageLevel.Warning)
             if bbox and not bbox.isEmpty():
                 buf = max(bbox.width(), bbox.height()) * 0.60 + 5
                 bbox.grow(buf)
@@ -690,7 +691,7 @@ class MoriMixin:
             marker.setCenter(pt)
             marker.setColor(QColor(255, 80, 0))
             marker.setIconSize(14)
-            marker.setIconType(QgsVertexMarker.ICON_CROSS)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_CROSS)
             marker.setPenWidth(3)
             self._mori_markers.append(marker)
 
@@ -698,22 +699,3 @@ class MoriMixin:
         extent = QgsRectangle(pt.x() - buf, pt.y() - buf, pt.x() + buf, pt.y() + buf)
         canvas.setExtent(extent)
         canvas.refresh()
-
-    # ------------------------------------------------------------------
-    # 全画面トグル
-    # ------------------------------------------------------------------
-
-    def _toggle_mori_fullscreen(self, on):
-        if on:
-            if not self.isFloating():
-                self.setFloating(True)
-            self.showMaximized()
-            # showMaximized() がネイティブウィンドウのオーナー関係を
-            # 再設定してしまうため、次のイベントループで解除し直す
-            QTimer.singleShot(0, self._detach_native_window_owner)
-            self.btn_mori_fullscreen.setText('格納')
-        else:
-            self.showNormal()
-            if self.isFloating():
-                self.setFloating(False)
-            self.btn_mori_fullscreen.setText('全画面')
