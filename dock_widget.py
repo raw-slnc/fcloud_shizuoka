@@ -13,7 +13,7 @@ from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
-    QgsProject, QgsVectorLayer,
+    QgsProject, QgsVectorLayer, QgsRasterLayer,
     QgsNetworkAccessManager, QgsCoordinateTransform, QgsWkbTypes,
     QgsLayerTreeLayer, QgsFeatureRequest,
 )
@@ -35,6 +35,10 @@ from .tab_shinrinbo import ShinrinboMixin
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
 _HL_SEL_FILL   = QColor(210,  30,  30,  25)
+
+# 背景タイル「静岡県 微地形表現図」（森林クラウドでの表示名。CS立体図）
+_BG_CS3D_NAME = '静岡県 微地形表現図'
+_BG_CS3D_URL  = 'https://fcloud.pref.shizuoka.jp/MAP/raster/CS_3D_MAP/{z}/{x}/{y}.png'
 
 
 class FcloudDock(QDockWidget):
@@ -245,6 +249,14 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.btn_rindo.setToolTip('林道 MVT レイヤーを追加/除去')
         self.btn_rindo.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
         bottom_row.addWidget(self.btn_rindo)
+
+        self.btn_bg_cs3d = QPushButton(_BG_CS3D_NAME)
+        self.btn_bg_cs3d.setToolTip(
+            '森林クラウドの背景タイル「静岡県 微地形表現図」（CS立体図）を'
+            'レイヤーとして追加する。追加済みならグレーアウト。\n'
+            '通常のレイヤーとして残る（トグルではなく、プラグイン終了時に自動では消えない）')
+        self.btn_bg_cs3d.setStyleSheet(_btn_style)
+        bottom_row.addWidget(self.btn_bg_cs3d)
         bottom_row.addStretch()
 
         btn_data_info = QPushButton('データについて')
@@ -275,6 +287,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.btn_rindo.toggled.connect(lambda on: self._toggle_mvt_layer(
             'https://fcloud.pref.shizuoka.jp/MAP/MVT/MAGIS.RINDO/{z}/{x}/{y}.pbf',
             'fcloud_林道', on))
+        self.btn_bg_cs3d.clicked.connect(self._add_bg_cs3d_layer)
         self.btn_cache_save.clicked.connect(self._save_current_cache)
         self.btn_cache_update.clicked.connect(self._update_current_cache)
         self.cloud_tab.currentChanged.connect(self._on_tab_changed)
@@ -515,6 +528,52 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                     remove_project_layer(project, lid)
                     break
 
+    @staticmethod
+    def _bg_cs3d_layer_exists():
+        """「静岡県 微地形表現図」のタイルURLを使うレイヤーがプロジェクト内に
+        既にあるか（このボタンで追加したかどうかは問わない。名前で判定すると
+        手動で改名された場合に見失うため、ソースURLで判定する）。"""
+        for layer in QgsProject.instance().mapLayers().values():
+            try:
+                uri = layer.dataProvider().dataSourceUri()
+            except (AttributeError, RuntimeError):
+                # RuntimeError: プロジェクト終了処理中でレイヤーのC++実体が
+                # 既に破棄されている場合（sip: wrapped C/C++ object has been deleted）
+                continue
+            if 'CS_3D_MAP' in uri:
+                return True
+        return False
+
+    def _update_bg_cs3d_btn_state(self, *_args):
+        # layersAdded/layersRemoved 経由で呼ばれるため、QGIS終了処理中に
+        # ボタン（ひいてはこのウィジェット自体）が既に破棄されている場合がある
+        btn = getattr(self, 'btn_bg_cs3d', None)
+        if btn is None or sip.isdeleted(btn):
+            return
+        btn.setEnabled(not self._bg_cs3d_layer_exists())
+
+    def _add_layer_at_bottom(self, layer, visible=True):
+        """背景タイル用。既存レイヤーの下（描画順で最背面）に追加する。"""
+        QgsProject.instance().addMapLayer(layer, False)
+        root = QgsProject.instance().layerTreeRoot()
+        node = QgsLayerTreeLayer(layer)
+        node.setItemVisibilityChecked(visible)
+        root.insertChildNode(len(list(root.children())), node)
+
+    def _add_bg_cs3d_layer(self):
+        if self._bg_cs3d_layer_exists():
+            self._update_bg_cs3d_btn_state()
+            return
+        encoded = urllib.parse.quote(_BG_CS3D_URL, safe='')
+        layer = QgsRasterLayer(
+            f'type=xyz&url={encoded}&zmax=18&zmin=4', _BG_CS3D_NAME, 'wms')
+        if not layer.isValid():
+            QMessageBox.warning(self, _BG_CS3D_NAME, 'レイヤーの追加に失敗しました。')
+            return
+        self._add_layer_at_bottom(layer)
+        self._update_bg_cs3d_btn_state()
+        self._refresh_map_canvas()
+
     # ------------------------------------------------------------------
     # タブ切替（接続部分のクリーンアップを統括）
     # ------------------------------------------------------------------
@@ -713,14 +772,18 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
     def _connect_project_signals(self):
         QgsProject.instance().layersAdded.connect(self._refresh_layer_combo)
         QgsProject.instance().layersRemoved.connect(self._refresh_layer_combo)
+        QgsProject.instance().layersAdded.connect(self._update_bg_cs3d_btn_state)
+        QgsProject.instance().layersRemoved.connect(self._update_bg_cs3d_btn_state)
         QgsProject.instance().readProject.connect(self._on_project_read)
         # 注意: iface.currentLayerChanged にはあえて接続しない。
         # レイヤーパネルでのクリックにプラグインの接続先が追従すると、
         # 意図せず接続GPKGが切り替わってしまうため。
+        self._update_bg_cs3d_btn_state()
 
     def _on_project_read(self, *_):
         self._schedule_layer_combo_refresh()
         QTimer.singleShot(300, self._schedule_layer_combo_refresh)
+        self._update_bg_cs3d_btn_state()
 
     def _schedule_layer_combo_refresh(self, delay_ms=0):
         self._layer_refresh_timer.start(max(0, int(delay_ms)))
@@ -1153,4 +1216,19 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             QgsProject.instance().readProject.disconnect(self._on_project_read)
         except (TypeError, RuntimeError):
             pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
+        # 終了処理中はプロジェクトのレイヤーが一斉に破棄されlayersAdded/layersRemoved
+        # が連発しうる。ここで切っておけば、その後ウィジェットが破棄されていても
+        # ハンドラ自体が呼ばれなくなる（_update_bg_cs3d_btn_state 等のガードとは
+        # 別に、そもそも発火させない対策）。
+        project = QgsProject.instance()
+        for sig, slot in (
+            (project.layersAdded, self._refresh_layer_combo),
+            (project.layersRemoved, self._refresh_layer_combo),
+            (project.layersAdded, self._update_bg_cs3d_btn_state),
+            (project.layersRemoved, self._update_bg_cs3d_btn_state),
+        ):
+            try:
+                sig.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         self._teardown_visible_state()
