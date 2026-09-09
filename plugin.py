@@ -48,6 +48,11 @@ class FcloudShizuoka:
         self.window.attach_dock_widget(self.dock)
         self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.dock)
         self.dock.hide()
+        # QGIS本体の起動時ウィンドウ状態復元（mainWindow().restoreState()）は
+        # initGui() より後に走り、前回セッションで開いたままだった場合は上の
+        # hide() を上書きして表示状態に戻してしまう。QGIS の起動完了を待って
+        # から改めて隠すことで、毎回必ず閉じた状態で起動するようにする。
+        self.iface.initializationCompleted.connect(self._force_dock_hidden)
 
         icon = QIcon(os.path.join(PLUGIN_DIR, 'icon.png'))
         self.action = QAction(icon, _TITLE, self.iface.mainWindow())
@@ -64,6 +69,10 @@ class FcloudShizuoka:
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
+
+    def _force_dock_hidden(self):
+        if self.dock is not None and not sip.isdeleted(self.dock):
+            self.dock.hide()
 
     def _remove_stale_layers(self, *args):
         stale_names = {
@@ -84,6 +93,10 @@ class FcloudShizuoka:
     def unload(self):
         try:
             QgsProject.instance().readProject.disconnect(self._remove_stale_layers)
+        except (TypeError, RuntimeError):
+            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
+        try:
+            self.iface.initializationCompleted.disconnect(self._force_dock_hidden)
         except (TypeError, RuntimeError):
             pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         app = QApplication.instance()
@@ -113,6 +126,11 @@ class FcloudShizuoka:
             self._is_shutting_down = False
 
     def _on_about_to_quit(self):
+        # QGIS本体が今回のウィンドウ配置（ドックの表示/非表示を含む）を保存する
+        # 前に隠しておく。開いたまま保存されると、次回起動時にQGIS自身の
+        # restoreState()がそれを復元してしまい、initializationCompleted 側での
+        # 後追いの hide() 頼みになる（一瞬表示されてから消える見た目になりうる）。
+        self._force_dock_hidden()
         self._shutdown_window()
 
     def _on_dock_visibility_changed(self, visible):

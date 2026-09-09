@@ -367,8 +367,11 @@ class MoriMixin:
         elif '管理番号' in field_names:
             clauses.append('"管理番号" IS NULL AND "管理番号" IS NOT NULL')
 
-        self._apply_mori_style(layer)
+        # 先にサブセットを適用してから凡例を組む。逆にすると _apply_mori_style 内の
+        # layer.uniqueValues('管理番号') が「全県 or 前回検索」の管理番号を拾い、
+        # 今回検索に無いものが全部「（整備者不明）」グループへ入ってしまう。
         layer.setSubsetString(' AND '.join(clauses))
+        self._apply_mori_style(layer)
         self._refresh_map_canvas()
         self._fill_missing_mori_geometries()
 
@@ -620,7 +623,7 @@ class MoriMixin:
         if layer.featureCount() == 0:
             self._start_mori_mvt_fetch()
             return
-        self._apply_mori_style(layer)
+        # スタイル付与は _apply_mori_layer_filter() に任せる（サブセット適用後）
         visible = (self.btn_mori_layer.isChecked()
                    and self.cloud_tab.currentIndex() == 3)
         self._add_layer_above_gpkg(layer, visible=visible)
@@ -718,7 +721,7 @@ class MoriMixin:
 
         save_layer = self._dissolve_mori_features_by_kanri(layer, feats_to_add)
         save_layer.setName('fcloud_森の力実施箇所')
-        self._apply_mori_style(save_layer)
+        # スタイル付与は _apply_mori_layer_filter() に任せる（サブセット適用後）
 
         gpkg = self._get_mori_gpkg_path()
         if gpkg and not feats_to_add:
