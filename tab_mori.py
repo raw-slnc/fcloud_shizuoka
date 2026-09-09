@@ -20,7 +20,10 @@ from qgis.core import (
 from qgis.gui import QgsVertexMarker
 from qgis.PyQt.QtCore import QVariant
 
-from .constants import _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST, _TOGGLE_BTN_QSS_LAYER
+from .constants import (
+    _API_BASE, _MORI_MVT_ZOOM, _NORIN_OFFICES, _NENDO_LIST, _TOGGLE_BTN_QSS_LAYER,
+    _MORI_FIELDS, _MORI_COL_W, _MORI_COL_W_DEFAULT,
+)
 from .layer_cleanup import remove_project_layer
 
 
@@ -72,17 +75,13 @@ class MoriMixin:
         row.addWidget(self.btn_mori_layer)
         v.addLayout(row)
 
-        self.tbl_mori = self._make_table(
-            ['農林事務所', '年度', 'モデル林', '整備者住所', '整備者名', '整備者代表', '総面積(ha)', '所在地', '林小班'])
+        self.tbl_mori = self._make_table([lbl for lbl, *_ in _MORI_FIELDS])
         hdr = self.tbl_mori.horizontalHeader()
-        hdr.setSectionResizeMode(0, hdr.Fixed)
-        hdr.setSectionResizeMode(1, hdr.Fixed)
-        hdr.setSectionResizeMode(2, hdr.Fixed)
-        hdr.setSectionResizeMode(6, hdr.Fixed)
-        self.tbl_mori.setColumnWidth(0, 130)
-        self.tbl_mori.setColumnWidth(1, 90)
-        self.tbl_mori.setColumnWidth(2, 60)
-        self.tbl_mori.setColumnWidth(6, 70)
+        # 列数が多いので Stretch をやめ、既定幅＋横スクロールで扱う
+        hdr.setSectionResizeMode(hdr.Interactive)
+        hdr.setStretchLastSection(False)
+        for i, (lbl, *_keys) in enumerate(_MORI_FIELDS):
+            self.tbl_mori.setColumnWidth(i, _MORI_COL_W.get(lbl, _MORI_COL_W_DEFAULT))
         v.addWidget(self.tbl_mori, 1)
 
         bottom = QHBoxLayout()
@@ -108,6 +107,9 @@ class MoriMixin:
         self.tbl_mori.setRowCount(0)
         self.lbl_mori_count.setText('検索中...')
         self.btn_mori_search.setEnabled(False)
+        # 検索条件が変わったら形状追補の試行済みマーク・実行中の年度スイープを破棄
+        self._mori_geom_fetch_attempted = set()
+        self._mori_sweep_active = False
         params = {}
         norin = self.combo_mori_norin.currentText().strip()
         if norin:
@@ -150,13 +152,112 @@ class MoriMixin:
             self.lbl_mori_count.setText('取得失敗')
             self._update_cache_btn_states()
             return
+        records = self._extract_records(data)
+        try:
+            office_total = int(records[0].get('総行数'))
+        except (TypeError, ValueError, IndexError, AttributeError):
+            office_total = len(records)
+        # 「（全て）」検索がサーバー上限(500)で切れている → 年度別にスイープして全件化する
+        year_active = self._current_mori_filter.get('年度') is not None
+        if (not year_active) and office_total > len(records) and len(records) >= 500:
+            self._start_mori_year_sweep(records, office_total)
+            return
         self._current_raw_mori = data
         self.lbl_cache_ts.setText('取得日時: 未保存')
         total = self._display_mori_table(data)
         self._auto_show_mori_layer(total)
         self._update_cache_btn_states()
 
+    # ------------------------------------------------------------------
+    # 年度別スイープ（500件上限の回避）
+    #
+    # 森の力検索 API は農林事務所単位で最大500件しか返さない（レスポンスの
+    # 「総行数」に真の件数が入る。page/offset/limit 等のページング引数は全て無効）。
+    # 「（全て）」検索が上限に当たったら、その事務所の年度を1年ずつ問い合わせて
+    # 管理番号で重複除去しながら結合し、全件を得る。上限に当たらない事務所・
+    # 年度指定済みの検索では従来どおり1リクエストで完了する。
+    # ------------------------------------------------------------------
+
+    def _start_mori_year_sweep(self, first_records, office_total):
+        self._mori_sweep_active = True
+        self._mori_sweep_gen += 1
+        gen = self._mori_sweep_gen
+        self._mori_sweep_office_total = office_total
+        # 先頭500件を種として投入（年度表記が揺れて年度検索で拾えないレコードの保険）
+        self._mori_sweep_records = {}
+        for rec in first_records:
+            if isinstance(rec, dict):
+                self._mori_sweep_records.setdefault(self._mori_rec_key(rec), rec)
+
+        base = {}
+        norin = self._current_mori_filter.get('農林事務所') or ''
+        if norin:
+            base['農林事務所'] = norin
+        kubun = self._current_mori_filter.get('事業区分') or ''
+        if kubun:
+            base['事業区分'] = kubun
+
+        years = [wareki for _label, wareki in _NENDO_LIST]
+        # _NENDO_LIST は 2019 を「令和1年度」とするが森の力データは「平成31年度」表記。
+        # 表記揺れ対策として代替表記と、種レコードに現れた年度表記を追加する。
+        for alt in ('平成31年度', '令和元年度'):
+            if alt not in years:
+                years.append(alt)
+        for rec in first_records:
+            y = str(rec.get('年度', '') or '').strip()
+            if y and y not in years:
+                years.append(y)
+        self._mori_sweep_pending = len(years)
+        self._mori_sweep_done = 0
+        self.btn_mori_search.setEnabled(False)
+        self.lbl_mori_count.setText(f'全年度取得中... (0/{len(years)})')
+        for wareki in years:
+            params = dict(base, **{'年度': str(wareki)})
+            self._post_api(
+                f'{_API_BASE}/advanced-search/森の力検索',
+                params,
+                lambda d, w=wareki, g=gen: self._on_mori_sweep_year(d, w, g),
+            )
+
+    @staticmethod
+    def _mori_rec_key(rec):
+        # fid はレコード（行）ごとに一意。同一管理番号で複数行あるケース
+        # （環境伐＋倒木等処理など）も取りこぼさず、種と年度結果を正しく統合できる。
+        fid = rec.get('fid')
+        if fid not in (None, '', 'NULL'):
+            return f'fid:{fid}'
+        k = str(rec.get('管理番号', '') or '').strip()
+        return k if k else f'row:{id(rec)}'
+
+    def _on_mori_sweep_year(self, data, wareki, gen):
+        if not self._mori_sweep_active or gen != self._mori_sweep_gen:
+            return
+        for rec in self._extract_records(data or []):
+            if isinstance(rec, dict):
+                self._mori_sweep_records.setdefault(self._mori_rec_key(rec), rec)
+        self._mori_sweep_done += 1
+        self.lbl_mori_count.setText(
+            f'全年度取得中... ({self._mori_sweep_done}/{self._mori_sweep_pending})')
+        if self._mori_sweep_done >= self._mori_sweep_pending:
+            self._finish_mori_year_sweep()
+
+    def _finish_mori_year_sweep(self):
+        self._mori_sweep_active = False
+        self.btn_mori_search.setEnabled(True)
+        merged = list(self._mori_sweep_records.values())
+        self._mori_sweep_records = {}
+        # 「総行数」を事務所総数で統一（キャッシュ再読込時も分母が安定する）
+        ot = self._mori_sweep_office_total or len(merged)
+        for rec in merged:
+            rec['総行数'] = ot
+        self._current_raw_mori = merged
+        self.lbl_cache_ts.setText('取得日時: 未保存')
+        total = self._display_mori_table(merged)
+        self._auto_show_mori_layer(total)
+        self._update_cache_btn_states()
+
     def _on_mori_condition_changed(self, *_):
+        self._mori_sweep_active = False
         self.lbl_mori_count.setText('条件変更後は検索を押してください')
         self.lbl_cache_ts.setText('取得日時: —')
         self.btn_cache_save.setEnabled(False)
@@ -164,6 +265,13 @@ class MoriMixin:
 
     def _display_mori_table(self, data):
         records = self._extract_records(data)
+
+        # 管轄事務所の総数（＝件数表示の分母）。整備者による絞り込み前に確定する。
+        try:
+            office_total = int(records[0].get('総行数'))
+        except (TypeError, ValueError, IndexError, AttributeError):
+            office_total = len(records)
+        self._current_mori_office_total = office_total
 
         seibi_vals = sorted(set(
             str(r.get('申請者_整備者_氏名', '') or '')
@@ -207,25 +315,20 @@ class MoriMixin:
         for row_i, rec in enumerate(records):
             if not isinstance(rec, dict):
                 continue
-            vals = [
-                _get(rec, '農林事務所'),
-                _get(rec, '年度'),
-                _get(rec, 'モデル林フラグ', 'モデル林'),
-                _get(rec, '申請者_整備者_住所'),
-                _get(rec, '申請者_整備者_氏名'),
-                _get(rec, '申請者_整備者_氏名_代表者'),
-                _get(rec, '対象森林_総面積', '表示用_対象森林_総面積'),
-                _get(rec, '対象森林_所在地'),
-                _get(rec, '対象森林_林小班'),
-            ]
-            for col, v in enumerate(vals):
-                item = QTableWidgetItem(' ' + v)
+            for col, (_lbl, *keys) in enumerate(_MORI_FIELDS):
+                item = QTableWidgetItem(' ' + _get(rec, *keys))
                 item.setData(Qt.UserRole, rec)
                 self.tbl_mori.setItem(row_i, col, item)
 
-        self.lbl_mori_count.setText(f'{total}件')
+        self.lbl_mori_count.setText(self._mori_count_label())
         self._apply_mori_layer_filter()
         return total
+
+    def _mori_count_label(self, note=''):
+        """件数ラベル文字列: 「表示件数/管轄事務所の総数件」（＋補足）。"""
+        rows = self.tbl_mori.rowCount()
+        denom = getattr(self, '_current_mori_office_total', 0) or rows
+        return f'{rows}/{denom}件{note}'
 
     def _auto_show_mori_layer(self, total):
         if total <= 0:
@@ -267,6 +370,204 @@ class MoriMixin:
         self._apply_mori_style(layer)
         layer.setSubsetString(' AND '.join(clauses))
         self._refresh_map_canvas()
+        self._fill_missing_mori_geometries()
+
+    # ------------------------------------------------------------------
+    # 検索結果にあるがレイヤー(キャッシュGPKG)に形状が無い管理番号の追補
+    #
+    # 実施箇所レイヤーは MVT を zoom13 で全県プリフェッチした GPKG キャッシュ。
+    # 県が新年度分を MVT へ追加しても、GPKG があると再取得されないため、表には
+    # 出るのに地図に形状が出ない管理番号が生じる（クラウドでは出る）。
+    # ここで「表示中だがレイヤーに無い管理番号」を検出し、その hilight 座標の
+    # タイルだけ取得してレイヤー／GPKG へ追記する。
+    # ------------------------------------------------------------------
+
+    def _fill_missing_mori_geometries(self):
+        if getattr(self, '_mori_fill_pending', 0):
+            return  # 追補取得が進行中
+        if not self._mori_vector_layer_id:
+            return
+        layer = QgsProject.instance().mapLayer(self._mori_vector_layer_id)
+        if not layer or sip.isdeleted(layer):
+            return
+        if layer.fields().indexOf('管理番号') < 0:
+            return
+
+        expected = [k for k in dict.fromkeys(
+            getattr(self, '_current_mori_display_kanri', []) or []) if k]
+        if not expected:
+            return
+
+        attempted = self._mori_geom_fetch_attempted
+        # subsetString は expected の IN 句なので、走査結果 = 実在する expected 集合
+        present = {str(f['管理番号'] or '').strip() for f in layer.getFeatures()}
+        missing = [k for k in expected if k not in present and k not in attempted]
+        if not missing:
+            return
+        attempted.update(missing)
+
+        # 管理番号 -> (lon, lat)（API 生データの hilight 座標）
+        pts = {}
+        for rec in self._extract_records(getattr(self, '_current_raw_mori', None) or []):
+            if not isinstance(rec, dict):
+                continue
+            k = str(rec.get('管理番号', '') or '').strip()
+            if k in missing and k not in pts:
+                x, y = rec.get('hilight_point_x'), rec.get('hilight_point_y')
+                if x is None or y is None:
+                    continue
+                try:
+                    pts[k] = (float(x), float(y))
+                except (TypeError, ValueError):
+                    pass  # 座標が数値でないレコードは追補対象外（想定内）
+        if not pts:
+            return
+
+        from .mvt_loader import _lon_to_tile_x, _lat_to_tile_y
+        z = _MORI_MVT_ZOOM
+        want_tiles = set()
+        for x, y in pts.values():
+            cx, cy = _lon_to_tile_x(x, z), _lat_to_tile_y(y, z)
+            # 形状がタイル境界をまたぐことがあるので 3x3 で取る
+            for tx in (cx - 1, cx, cx + 1):
+                for ty in (cy - 1, cy, cy + 1):
+                    want_tiles.add((tx, ty))
+
+        if len(want_tiles) > 400:
+            self.lbl_mori_count.setText(
+                self._mori_count_label('（未取得の形状が多数 — 「更新」で再取得してください）'))
+            return
+
+        self._mori_fill_missing = set(pts.keys())
+        self._mori_fill_pending = len(want_tiles)
+        self._mori_fill_received = 0
+        self._mori_fill_feats = []
+        self.lbl_mori_count.setText(
+            self._mori_count_label(f'（形状 {len(self._mori_fill_missing)}件を追加取得中…）'))
+
+        mvt_url = ('https://fcloud.pref.shizuoka.jp/MAP/MVT/'
+                   'MAGIS.MORI_NO_CHIKARA/{z}/{x}/{y}.pbf')
+        for tx, ty in want_tiles:
+            url = mvt_url.replace('{z}', str(z)).replace('{x}', str(tx)).replace('{y}', str(ty))
+            reply = QgsNetworkAccessManager.instance().get(QNetworkRequest(QUrl(url)))
+            self._pending_replies.append(reply)
+            reply.finished.connect(
+                lambda r=reply, x=tx, y=ty: self._on_mori_fill_tile(r, x, y))
+
+    def _on_mori_fill_tile(self, reply, tile_x, tile_y):
+        from .mvt_loader import parse_tile
+        if not self._mori_fill_pending:
+            # レイヤー除去などでバッチが破棄済み
+            if reply in self._pending_replies:
+                self._pending_replies.remove(reply)
+            reply.deleteLater()
+            return
+        if reply.error() == QNetworkReply.NoError:
+            raw = bytes(reply.readAll())
+            try:
+                for f in parse_tile(raw, tile_x, tile_y, _MORI_MVT_ZOOM,
+                                    'MAGIS.MORI_NO_CHIKARA'):
+                    if str(f.get('管理番号', '') or '').strip() in self._mori_fill_missing:
+                        self._mori_fill_feats.append(f)
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f'[fcloud] mori fill parse error tile({tile_x},{tile_y}): {e}',
+                    level=Qgis.Warning)
+        if reply in self._pending_replies:
+            self._pending_replies.remove(reply)
+        reply.deleteLater()
+        self._mori_fill_received += 1
+        if self._mori_fill_received >= self._mori_fill_pending:
+            self._commit_mori_fill()
+
+    def _commit_mori_fill(self):
+        from collections import defaultdict
+        pending_missing = set(self._mori_fill_missing)
+        feats = self._mori_fill_feats
+        self._mori_fill_pending = 0
+        self._mori_fill_received = 0
+        self._mori_fill_feats = []
+        self._mori_fill_missing = set()
+
+        layer = (QgsProject.instance().mapLayer(self._mori_vector_layer_id)
+                 if self._mori_vector_layer_id else None)
+        if not layer or sip.isdeleted(layer):
+            return
+
+        groups = defaultdict(list)
+        meta = {}
+        for f in feats:
+            k = str(f.get('管理番号', '') or '').strip()
+            if k not in pending_missing:
+                continue
+            g = QgsGeometry.fromWkt(f.get('geometry', '') or '')
+            if not g or g.isEmpty():
+                continue
+            groups[k].append(g)
+            meta.setdefault(k, f)
+
+        fields = layer.fields()
+        i_kanri = fields.indexOf('管理番号')
+        i_ku = fields.indexOf('事業区分')
+        i_sho = fields.indexOf('詳細区分')
+        i_nen = fields.indexOf('年度')
+        i_nor = fields.indexOf('農林事務所')
+        i_sei = fields.indexOf('整備者名')
+
+        new_feats = []
+        for k, geoms in groups.items():
+            try:
+                geom = QgsGeometry.unaryUnion(geoms)
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f'[fcloud] mori fill unaryUnion failed for {k}: {e}',
+                    level=Qgis.Warning)
+                geom = geoms[0]
+                for extra in geoms[1:]:
+                    try:
+                        geom = geom.combine(extra)
+                    except Exception as e:
+                        QgsMessageLog.logMessage(
+                            f'[fcloud] mori fill combine failed for {k}: {e}',
+                            level=Qgis.Warning)
+            if not geom or geom.isEmpty():
+                continue
+            a = meta[k]
+            qf = QgsFeature(fields)
+            qf.setGeometry(geom)
+            if i_kanri >= 0:
+                qf.setAttribute(i_kanri, k)
+            if i_ku >= 0:
+                qf.setAttribute(i_ku, str(a.get('事業区分', '') or ''))
+            if i_sho >= 0:
+                qf.setAttribute(i_sho, str(a.get('詳細区分', '') or ''))
+            if i_nen >= 0:
+                qf.setAttribute(i_nen, str(a.get('年度', '') or ''))
+            if i_nor >= 0:
+                qf.setAttribute(i_nor, str(a.get('農林事務所', '') or ''))
+            if i_sei >= 0:
+                qf.setAttribute(i_sei, str(
+                    a.get('申請者(整備者)_氏名', a.get('申請者_整備者_氏名', '')) or ''))
+            new_feats.append(qf)
+
+        if new_feats:
+            layer.dataProvider().addFeatures(new_feats)
+            layer.updateExtents()
+            layer.reload()
+            # スタイル・サブセットを貼り直して追加分を反映（管理番号は既に
+            # IN 句・スタイル規則に含まれるため、再帰しても missing は空になる）
+            self._apply_mori_layer_filter()
+
+        got = {k for k in groups}
+        still = sorted(pending_missing - got)
+        if still:
+            self.lbl_mori_count.setText(
+                self._mori_count_label(f'（形状データなし {len(still)}件）'))
+            QgsMessageLog.logMessage(
+                '[fcloud] 森の力: MVT に形状が見つからない管理番号: ' + ', '.join(still),
+                level=Qgis.Info)
+        else:
+            self.lbl_mori_count.setText(self._mori_count_label())
 
     # ------------------------------------------------------------------
     # レイヤー管理
@@ -324,12 +625,20 @@ class MoriMixin:
                    and self.cloud_tab.currentIndex() == 3)
         self._add_layer_above_gpkg(layer, visible=visible)
         self._mori_vector_layer_id = layer.id()
+        try:
+            import datetime
+            mt = datetime.datetime.fromtimestamp(os.path.getmtime(gpkg_path))
+            self.lbl_cache_ts.setText(f'レイヤーキャッシュ: {mt:%Y-%m-%d %H:%M}')
+        except OSError:
+            pass  # mtime が取れなくてもラベルを更新しないだけ（想定内）
         self._apply_mori_layer_filter()
 
     def _start_mori_mvt_fetch(self):
         if self._mori_loading:
             return
         self._mori_loading = True
+        # 全県フルフェッチなので、ピンポイント追補の試行済みマークは意味を失う
+        self._mori_geom_fetch_attempted = set()
         from .mvt_loader import shizuoka_tiles
         self._mori_layer_features = []
         tiles = shizuoka_tiles(zoom=_MORI_MVT_ZOOM)
@@ -435,8 +744,8 @@ class MoriMixin:
         self._mori_vector_layer_id = save_layer.id()
         self._apply_mori_layer_filter()
         self.btn_mori_layer.setEnabled(True)
-        total = self.tbl_mori.rowCount()
-        self.lbl_mori_count.setText(f'{total}件' if total else '')
+        self.lbl_mori_count.setText(
+            self._mori_count_label() if self.tbl_mori.rowCount() else '')
 
     def _dissolve_mori_features_by_kanri(self, template_layer, features):
         # Processing の一時出力を使わず、管理番号単位で統合して名前付きメモリレイヤーを作る。
@@ -569,6 +878,10 @@ class MoriMixin:
         self._mori_tiles_pending = 0
         self._mori_tiles_received = 0
         self._mori_loading = False
+        self._mori_fill_missing = set()
+        self._mori_fill_pending = 0
+        self._mori_fill_received = 0
+        self._mori_fill_feats = []
         self._refresh_map_canvas()
 
     def _clear_mori_markers(self):
@@ -580,8 +893,37 @@ class MoriMixin:
         self._mori_markers.clear()
 
     # ------------------------------------------------------------------
-    # 行選択 → ズーム
+    # 行選択 → 情報パネル / ズーム
     # ------------------------------------------------------------------
+
+    def _show_mori_record_info(self, rec):
+        """森の力レコードを左「クラウド情報」パネルへ表示する。
+        森林クラウド公開システムに合わせ、_MORI_FIELDS の全項目を
+        （空欄もそのまま）固定の並びで出す。"""
+        from html import escape
+        self.lbl_cloud_selected.setText('森の力')
+        if not isinstance(rec, dict):
+            self.cloud_info_browser.clear()
+            return
+
+        def _val(keys):
+            for k in keys:
+                v = rec.get(k)
+                if v is not None and str(v) not in ('', 'NULL', 'None'):
+                    return str(v)
+            return ''
+
+        parts = ['<table style="border-collapse:collapse;width:100%;">']
+        for lbl, *keys in _MORI_FIELDS:
+            parts.append(
+                '<tr>'
+                '<td style="color:gray;padding:2px 8px 2px 4px;white-space:nowrap;'
+                f'vertical-align:top;">{escape(lbl)}</td>'
+                f'<td style="padding:2px 4px;">{escape(_val(keys))}</td>'
+                '</tr>')
+        parts.append('</table>')
+        self.cloud_info_browser.setHtml(''.join(parts))
+        self.left_tab.setCurrentIndex(1)
 
     def _on_mori_selected(self):
         self._clear_mori_markers()
@@ -594,12 +936,11 @@ class MoriMixin:
         if not item:
             self._clear_cloud_record_info()
             return
-        row = rows[0].row()
         rec = item.data(Qt.UserRole)
         if not isinstance(rec, dict):
             self._clear_cloud_record_info()
             return
-        self._show_cloud_table_row_info('森の力', self.tbl_mori, row)
+        self._show_mori_record_info(rec)
 
         if not self.btn_mori_layer.isChecked():
             return
