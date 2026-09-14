@@ -9,8 +9,12 @@ from qgis.PyQt.QtWidgets import (
     QComboBox, QLabel, QTabWidget, QTextBrowser,
     QPushButton, QFrame, QMessageBox, QCheckBox,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QDesktopServices
+from qgis.PyQt.QtCore import (
+    Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal, QObject, QEvent,
+)
+from qgis.PyQt.QtGui import (
+    QColor, QDesktopServices, QKeySequence, QTextCursor, QTextTable,
+)
 from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer,
@@ -39,6 +43,94 @@ _HL_SEL_FILL   = QColor(210,  30,  30,  25)
 # 背景タイル「静岡県 微地形表現図」（森林クラウドでの表示名。CS立体図）
 _BG_CS3D_NAME = '静岡県 微地形表現図'
 _BG_CS3D_URL  = 'https://fcloud.pref.shizuoka.jp/MAP/raster/CS_3D_MAP/{z}/{x}/{y}.png'
+
+
+class _TableInputFilter(QObject):
+    """クラウド各表の共通操作:
+      * Shift+ホイール → 水平スクロール
+      * Ctrl+C        → 選択セルをタブ区切りでコピー（列構造を保ったまま）
+    ホイールは viewport、キーは表本体からイベントが来るので両方に入れる。
+    """
+
+    def __init__(self, table):
+        super().__init__(table)
+        self._table = table
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if (et == QEvent.Type.Wheel
+                and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+            sb = self._table.horizontalScrollBar()
+            sb.setValue(sb.value() - event.angleDelta().y())
+            return True
+        if (et == QEvent.Type.KeyPress
+                and event.matches(QKeySequence.StandardKey.Copy)):
+            _copy_table_selection(self._table)
+            return True
+        return False
+
+
+def _copy_table_selection(table):
+    """見出し行＋選択行を TSV（行=改行 / 列=タブ）でクリップボードへコピーする。
+    見出しもデータ行と同じタブ区切り1行として先頭に入る。"""
+    from qgis.PyQt.QtWidgets import QApplication
+    idxs = table.selectedIndexes()
+    if not idxs:
+        return
+    rows = sorted({i.row() for i in idxs})
+    cols = sorted({i.column() for i in idxs})
+
+    def _header(c):
+        hi = table.horizontalHeaderItem(c)
+        return hi.text().strip() if hi is not None else ''
+
+    lines = ['\t'.join(_header(c) for c in cols)]
+    for r in rows:
+        cells = []
+        for c in cols:
+            it = table.item(r, c)
+            cells.append(it.text().strip() if it is not None else '')
+        lines.append('\t'.join(cells))
+    QApplication.clipboard().setText('\n'.join(lines))
+
+
+def _info_browser_tsv(browser):
+    """情報パネル（QTextBrowser）に表示中の label/value テーブルを
+    TSV（行=改行 / 列=タブ）で返す。空欄行も残す。値は無加工。"""
+    doc = browser.document()
+    table = next((f for f in doc.rootFrame().childFrames()
+                  if isinstance(f, QTextTable)), None)
+    _brk = {0x2028: ' ', 0x2029: ' ', 0x0a: ' ', 0x0d: ' '}
+    if table is None:
+        return browser.toPlainText().strip()
+    lines = []
+    for r in range(table.rows()):
+        cells, c = [], 0
+        while c < table.columns():
+            cell = table.cellAt(r, c)
+            cur = QTextCursor(cell.firstCursorPosition())
+            cur.setPosition(cell.lastCursorPosition().position(),
+                            QTextCursor.MoveMode.KeepAnchor)
+            cells.append(cur.selectedText().translate(_brk).strip())
+            c += max(1, cell.columnSpan())
+        lines.append('\t'.join(cells))
+    return '\n'.join(lines)
+
+
+class _InfoBrowser(QTextBrowser):
+    """右クリックメニューに「全項目をコピー」を足した QTextBrowser。
+    標準メニュー（選択部分のコピー等）はそのまま残す。"""
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu(event.pos())
+        text = _info_browser_tsv(self)
+        if text:
+            from qgis.PyQt.QtWidgets import QApplication
+            menu.addSeparator()
+            menu.addAction(
+                '全項目をコピー',
+                lambda: QApplication.clipboard().setText(text))
+        menu.exec(event.globalPos())
 
 
 class FcloudDock(QDockWidget):
@@ -88,6 +180,21 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._mori_tiles_pending     = 0
         self._mori_tiles_received    = 0
         self._mori_loading           = False
+        # 検索結果にあるがレイヤー(GPKGキャッシュ)に形状が無い管理番号の
+        # ピンポイント追補取得用。検索条件が変わるたび _search_mori でリセットする。
+        self._mori_geom_fetch_attempted = set()
+        self._mori_fill_missing      = set()
+        self._mori_fill_pending      = 0
+        self._mori_fill_received     = 0
+        self._mori_fill_feats        = []
+        # 森の力検索 API の500件上限を年度別スイープで回避するための状態
+        self._current_mori_office_total = 0
+        self._mori_sweep_active      = False
+        self._mori_sweep_gen         = 0
+        self._mori_sweep_office_total = 0
+        self._mori_sweep_records     = {}
+        self._mori_sweep_pending     = 0
+        self._mori_sweep_done        = 0
         self._current_raw_keikaku    = None
         self._keikaku_vector_layer_id = None
         self._keikaku_layer_features  = []
@@ -155,8 +262,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
         # ── 左パネル ──────────────────────────────────────────────────
         left_w = QWidget()
-        left_w.setMinimumWidth(290)
-        left_w.setMaximumWidth(360)
+        # 森の力の情報パネルが全項目（空欄含む）を出すので少し広めに確保する
+        left_w.setMinimumWidth(330)
+        left_w.setMaximumWidth(440)
         left_v = QVBoxLayout(left_w)
         left_v.setContentsMargins(0, 0, 0, 0)
         left_v.setSpacing(4)
@@ -173,7 +281,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         selected_v = QVBoxLayout(selected_tab)
         selected_v.setContentsMargins(0, 0, 0, 3)
         selected_v.setSpacing(4)
-        self.info_browser = QTextBrowser()
+        self.info_browser = _InfoBrowser()
         self.info_browser.setOpenExternalLinks(False)
         selected_v.addWidget(self.info_browser, 1)
         self.lbl_selected = QLabel('計画図レイヤーで選択してください')
@@ -188,7 +296,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.lbl_cloud_selected = QLabel('右側の表で選択してください')
         self.lbl_cloud_selected.setStyleSheet('font-weight: bold; padding: 2px;')
         cloud_info_v.addWidget(self.lbl_cloud_selected)
-        self.cloud_info_browser = QTextBrowser()
+        self.cloud_info_browser = _InfoBrowser()
         self.cloud_info_browser.setOpenExternalLinks(False)
         cloud_info_v.addWidget(self.cloud_info_browser, 1)
         self.left_tab.addTab(cloud_info_tab, 'クラウド情報')
@@ -336,7 +444,30 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         # Dock の端でネイティブ枠線が見切れることがあるため、表の外枠を明示する。
         t.setFrameShape(QFrame.Shape.NoFrame)
         t.setStyleSheet('QTableWidget { border: 1px solid palette(dark); }')
+        self._enable_table_shortcuts(t)
         return t
+
+    def _enable_table_shortcuts(self, table):
+        """クラウド各表に共通の操作を付与する:
+        ピクセル単位スクロール／Shift+ホイールで水平スクロール／
+        Ctrl+C・右クリック「選択列をコピー」で見出し行＋選択行を TSV コピー。"""
+        from qgis.PyQt.QtWidgets import QAbstractItemView
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        filt = _TableInputFilter(table)
+        table.installEventFilter(filt)
+        table.viewport().installEventFilter(filt)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, t=table: self._show_table_context_menu(t, pos))
+
+    def _show_table_context_menu(self, table, pos):
+        from qgis.PyQt.QtWidgets import QMenu
+        if not table.selectedIndexes():
+            return
+        menu = QMenu(table)
+        menu.addAction('選択列をコピー', lambda: _copy_table_selection(table))
+        menu.exec(table.viewport().mapToGlobal(pos))
 
     def _post_api(self, url, params, callback):
         body = QByteArray(urllib.parse.urlencode(params).encode('utf-8'))

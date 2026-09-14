@@ -7,7 +7,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QPushButton, QAbstractItemView,
 )
-from qgis.PyQt.QtCore import Qt, QObject, QEvent
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsCoordinateTransform, QgsCoordinateReferenceSystem,
     QgsProject, QgsPointXY,
@@ -17,21 +17,6 @@ from .constants import (
     _API_BASE, _TOGGLE_BTN_QSS_ONOFF,
     _PRIMARY_FIELDS, _HISTORY_FIELDS, _MORINBO_OLD_CD_TO_CITY,
 )
-
-class _ShiftScrollFilter(QObject):
-    """Shift+ホイールで水平スクロールに変換するイベントフィルタ。"""
-    def __init__(self, table):
-        super().__init__(table)
-        self._table = table
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Wheel:
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                sb = self._table.horizontalScrollBar()
-                sb.setValue(sb.value() - event.angleDelta().y())
-                return True
-        return False
-
 
 _MVT_BASE = 'https://fcloud.pref.shizuoka.jp'
 _MVT_PATH = '/MAP/MVT/MAGIS.SHOHAN_SHINRINBO.5JOU'
@@ -109,15 +94,12 @@ class ShinrinboMixin:
         self.tbl_shinrinbo.setFrameShape(QFrame.Shape.NoFrame)
         self.tbl_shinrinbo.setStyleSheet(
             'QTableWidget { border: 1px solid palette(dark); }')
-        self.tbl_shinrinbo.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.tbl_shinrinbo.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         hdr = self.tbl_shinrinbo.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setStretchLastSection(False)
         self.tbl_shinrinbo.verticalHeader().setVisible(False)
-        self.tbl_shinrinbo.viewport().installEventFilter(
-            _ShiftScrollFilter(self.tbl_shinrinbo)
-        )
+        # ピクセルスクロール／Shift+ホイール水平／Ctrl+C・右クリックでコピー
+        self._enable_table_shortcuts(self.tbl_shinrinbo)
 
         v.addWidget(self.tbl_shinrinbo, 1)
 
