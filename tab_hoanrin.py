@@ -902,14 +902,16 @@ class HoanrinMixin:
 
     def _kozu_target_status(self, kozu, city, daiji):
         """Kozu が現在読み込んでいる DB に (city, daiji) の筆ポリゴンがあるか判定する。
-        戻り値 (ok, message, keep_ids)。
+        戻り値 (ok, message, keep_ids, keep_munis)。
           ok=False : message を案内ダイアログに使う（送信キャンセル）
           ok=True  : keep_ids は「対象市町村×対象大字」の xml_meta_id 集合。
-                     None のときは絞り込みなし（市町村不明／判定不能）。"""
+                     keep_munis はそれらに対応する Kozu 側の市町村生表記（strip 済み、
+                     comboOaza の見出しキー＝itemData(UserRole+1) と同じ形式）の集合。
+                     いずれも None のときは絞り込みなし（市町村不明／判定不能）。"""
         win = getattr(kozu, 'main_window', None)
         db = getattr(win, 'db', None) if win is not None else None
         if db is None:
-            return False, 'Kozu XML Integrator に地図データ（DB）が読み込まれていません。', None
+            return False, 'Kozu XML Integrator に地図データ（DB）が読み込まれていません。', None, None
         try:
             with db.connection() as conn:
                 rows = conn.execute(
@@ -919,17 +921,19 @@ class HoanrinMixin:
                     (daiji,),
                 ).fetchall()
         except Exception:
-            return True, '', None
-        pairs = [(r[0], r[1]) for r in rows if r and r[0] is not None]
+            return True, '', None, None
+        # strip はコンボの見出しキー（_populate_oaza_combo 側も strip 済み）と揃えるため
+        pairs = [(r[0], (r[1] or '').strip()) for r in rows if r and r[0] is not None]
         munis = sorted({m for _, m in pairs if m})
         disp_city = self._norm_muni(city)  # 飾りを落とした表示用の市町村名
         where = f'市町村「{disp_city}」大字「{daiji}」' if disp_city else f'大字「{daiji}」'
         if not munis:
-            return False, f'{where}が現在の Kozu XML Integrator の DB に存在しません。', None
+            return False, f'{where}が現在の Kozu XML Integrator の DB に存在しません。', None, None
         if not city:
-            return True, '', None
+            return True, '', None, None
         tgt = disp_city
         keep = set()
+        keep_munis = set()
         for mid, m in pairs:
             nm = self._norm_muni(m)
             if not nm or not tgt:
@@ -937,10 +941,35 @@ class HoanrinMixin:
             # 完全一致／政令市＋区（静岡市⊂静岡市葵区）／その逆向き
             if nm == tgt or nm.startswith(tgt) or tgt.startswith(nm):
                 keep.add(mid)
+                keep_munis.add(m)
         if keep:
-            return True, '', keep
+            return True, '', keep, keep_munis
         return False, (f'{where}が現在の Kozu XML Integrator の DB に存在しません'
-                       f'（同名大字は {"・".join(munis)} の分のみ）。'), None
+                       f'（同名大字は {"・".join(munis)} の分のみ）。'), None, None
+
+    @staticmethod
+    def _select_kozu_oaza(win, daiji, keep_munis):
+        """Kozu 側 comboOaza を選択する。
+
+        市町村見出し導入後、表示テキストは「見出し行のインデント＋大字名」になり
+        setCurrentText では一致しなくなったため、itemData（UserRole=大字名、
+        UserRole+1=市町村生表記）で照合する。keep_munis が None のときは市町村での
+        絞り込みができない（市町村不明／判定不能）ため大字名のみで一致させる。"""
+        combo = getattr(win, 'comboOaza', None)
+        if combo is None:
+            return
+        fallback = -1
+        for i in range(combo.count()):
+            if combo.itemData(i, Qt.ItemDataRole.UserRole) != daiji:
+                continue
+            if fallback < 0:
+                fallback = i
+            muni = combo.itemData(i, Qt.ItemDataRole.UserRole + 1)
+            if keep_munis is None or muni in keep_munis:
+                combo.setCurrentIndex(i)
+                return
+        if fallback >= 0:
+            combo.setCurrentIndex(fallback)
 
     def _send_to_kozu(self, city, daiji, chiban):
         from qgis.utils import plugins as _qplugins
@@ -949,7 +978,7 @@ class HoanrinMixin:
         if not kozu or not kozu.main_window:
             return
         daiji = self._strip_ward_prefix(daiji)  # 「葵区井川」→「井川」（Kozu側は区名なし）
-        ok, message, keep_ids = self._kozu_target_status(kozu, city, daiji)
+        ok, message, keep_ids, keep_munis = self._kozu_target_status(kozu, city, daiji)
         if not ok:
             QMessageBox.information(
                 self, '公図連携',
@@ -957,7 +986,7 @@ class HoanrinMixin:
                 '作成・追加してから再度お試しください。')
             return
         win = kozu.main_window
-        win.comboOaza.setCurrentText(daiji)
+        self._select_kozu_oaza(win, daiji, keep_munis)
         # 同名大字が複数市町村にある場合に他市町村の筆を拾わないよう、
         # 対象市町村の XML だけをツリーに残してから検索させる
         if keep_ids is not None:
