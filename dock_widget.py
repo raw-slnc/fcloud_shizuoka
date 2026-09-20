@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import html
 import json
 import os
 from qgis.PyQt import sip
@@ -28,8 +29,10 @@ from .constants import (
     _API_BASE, _CITY_TO_NORIN, _TOGGLE_BTN_QSS_LAYER,
     _PRIMARY_FIELDS, _HISTORY_FIELDS,
     _CD_API_PRIMARY_FIELDS, _CD_API_HISTORY_FIELDS,
+    _OWNER_FIELDS, _OWNER_LABEL, _OWNER_SOURCE_TITLE,
 )
 from .layer_cleanup import remove_project_layer
+from .privacy_guard import IdleWatcher, IDLE_TIMEOUT_MS, MASK_TEXT
 from .tab_hoanrin   import HoanrinMixin
 from .tab_mori      import MoriMixin
 from .tab_keikaku   import KeikakuMixin
@@ -220,6 +223,11 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._shinrinbo_col_map        = []
         self._mvt_tile_cache           = {}  # (z,x,y) → {key1: fid}
         self._info_gen                 = 0
+        self._owner_feat               = None  # 選択中の小班タブで所有者情報を表示中の地物（伏せ字の再描画用）
+        self._cloud_owner_feat         = None  # クラウド情報タブで所有者情報を続けている地物（森林簿の行の小班）
+        self._cloud_info_parts         = []    # クラウド情報タブに表示中の表（'</table>' で終わる HTML 断片）
+        self._privacy_masked           = False
+        self._idle_watcher             = None
         self._layer_refresh_timer      = QTimer(self)
         self._layer_refresh_timer.setSingleShot(True)
         self._layer_refresh_timer.timeout.connect(self._refresh_layer_combo)
@@ -293,11 +301,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         cloud_info_v = QVBoxLayout(cloud_info_tab)
         cloud_info_v.setContentsMargins(0, 0, 0, 3)
         cloud_info_v.setSpacing(4)
-        self.lbl_cloud_selected = QLabel('右側の表で選択してください')
-        self.lbl_cloud_selected.setStyleSheet('font-weight: bold; padding: 2px;')
-        cloud_info_v.addWidget(self.lbl_cloud_selected)
         self.cloud_info_browser = _InfoBrowser()
         self.cloud_info_browser.setOpenExternalLinks(False)
+        self.cloud_info_browser.setPlaceholderText('右側の表で選択してください')
         cloud_info_v.addWidget(self.cloud_info_browser, 1)
         self.left_tab.addTab(cloud_info_tab, 'クラウド情報')
 
@@ -334,12 +340,16 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.cloud_tab.addTab(self._build_tab_keikaku(),   '経営計画')
         self.cloud_tab.addTab(self._build_tab_rinchi(),    '林地開発')
 
+        self.chk_disable_zoom = QCheckBox('選択時のズームを無効化')
+        self.chk_disable_zoom.setToolTip('表の行を選択したとき、地図の縮尺は変えず、中心だけを選択位置に合わせる')
+        self.chk_disable_zoom.toggled.connect(self._on_disable_zoom_toggled)
         self.chk_separate_window = QCheckBox('別ウィンドウ')
         self.chk_separate_window.setToolTip('パネルを QGIS 本体から独立した別ウィンドウで表示する')
         self.chk_separate_window.toggled.connect(self._on_window_mode_toggled)
         _corner_w = QWidget()
         _corner_l = QHBoxLayout(_corner_w)
         _corner_l.setContentsMargins(0, 3, 0, 3)
+        _corner_l.addWidget(self.chk_disable_zoom)
         _corner_l.addWidget(self.chk_separate_window)
         self.cloud_tab.setCornerWidget(_corner_w, Qt.Corner.TopRightCorner)
 
@@ -522,9 +532,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             )
             return
         parts = ['<table style="border-collapse:collapse;width:100%;">']
-        parts.append(
-            '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
-            'padding:3px;">基本情報（森林クラウド）</td></tr>')
+        parts.append(self._info_title_row('基本情報（森林クラウド）'))
         for src, label in _CD_API_PRIMARY_FIELDS:
             val = data.get(src)
             if val is None or str(val) in ('', 'NULL', '0', 'None'):
@@ -546,9 +554,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 f'border-bottom:1px solid #eee;">'
                 f'{yr}年度: {method}（{etype}）</td></tr>')
         if hist_rows:
-            parts.append(
-                '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
-                'padding:3px;">施業履歴</td></tr>')
+            parts.append(self._info_title_row('施業履歴'))
             parts.extend(hist_rows)
         parts.append('</table>')
         self.info_browser.setHtml(''.join(parts))
@@ -721,6 +727,11 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         s.setValue('fcloud_shizuoka/tab_order_version', self._TAB_ORDER_VERSION)
         if 0 <= tab < self.cloud_tab.count():
             self.cloud_tab.setCurrentIndex(tab)
+        # 状態の復元だけなので、保存処理（toggled）は走らせない
+        self.chk_disable_zoom.blockSignals(True)
+        self.chk_disable_zoom.setChecked(
+            s.value('fcloud_shizuoka/disable_zoom', False, type=bool))
+        self.chk_disable_zoom.blockSignals(False)
 
     @staticmethod
     def _migrate_tab_index(tab):
@@ -1099,6 +1110,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         if not features:
             self.lbl_selected.setText('計画図レイヤーで選択してください')
             self.info_browser.clear()
+            self._track_owner_info(None)
             self._refresh_shinrinbo_tab([])
             return
         feat = features[0]
@@ -1164,6 +1176,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
     def _show_feature_info(self, feat):
         if self._layer_type in ('cd_gpkg', 'shp'):
+            self._track_owner_info(None)
             self.info_browser.setHtml(
                 '<p style="color:gray;padding:8px;">小班ID解決中...</p>'
             )
@@ -1186,12 +1199,14 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
             self._resolve_fids_via_mvt([feat], on_fid_resolved)
             return
+        self._render_gpkg_info(feat)
+
+    def _render_gpkg_info(self, feat):
+        """gpkg 型の小班の基本情報・所有者情報・施業履歴を情報パネルへ描画する。"""
         fnames = feat.fields().names()
         parts = ['<table style="border-collapse:collapse;width:100%;">']
 
-        parts.append(
-            '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
-            'padding:3px;">基本情報</td></tr>')
+        parts.append(self._info_title_row('基本情報'))
         for src, label in _PRIMARY_FIELDS:
             if src not in fnames:
                 continue
@@ -1201,6 +1216,10 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             parts.append(
                 f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;">'
                 f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
+
+        owner_rows = self._owner_rows(feat)
+        parts.extend(owner_rows)
+        self._track_owner_info(feat if owner_rows else None)
 
         hist_rows = []
         for y_f, m_f, e_f in _HISTORY_FIELDS:
@@ -1214,20 +1233,99 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 f'border-bottom:1px solid #eee;">'
                 f'{yr}年度: {method}（{etype}）</td></tr>')
         if hist_rows:
-            parts.append(
-                '<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
-                'padding:3px;">施業履歴</td></tr>')
+            parts.append(self._info_title_row('施業履歴'))
             parts.extend(hist_rows)
 
         parts.append('</table>')
         self.info_browser.setHtml(''.join(parts))
 
-    def _show_cloud_table_row_info(self, title, table, row):
-        self.lbl_cloud_selected.setText(title)
-        if table is None or row < 0:
-            self.cloud_info_browser.clear()
+    # ------------------------------------------------------------------
+    # 所有者情報の伏せ字（QGIS が一定時間無操作のとき）
+    # ------------------------------------------------------------------
+
+    def _owner_rows(self, feat):
+        """feat の所有者情報を「項目名 | 値」の表の行にして返す（無ければ空）。
+        項目名は先頭行だけで、住所など2行目以降は空にして続ける。
+        伏せ字状態のときは値を伏せ字にする。"""
+        fnames = feat.fields().names()
+        vals = []
+        for src in _OWNER_FIELDS:
+            if src not in fnames:
+                continue
+            val = feat[src]
+            if val is None or str(val) in ('', 'NULL'):
+                continue
+            vals.append(MASK_TEXT if self._privacy_masked else html.escape(str(val)))
+        rows = []
+        for i, val in enumerate(vals):
+            label = _OWNER_LABEL if i == 0 else ''
+            rows.append(
+                f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;vertical-align:top;">'
+                f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
+        return rows
+
+    def _track_owner_info(self, feat):
+        """選択中の小班タブに所有者情報を表示中の地物を覚える（無ければ None）。"""
+        self._owner_feat = feat
+        self._update_privacy_guard()
+
+    def _update_privacy_guard(self):
+        """所有者情報をどちらかのタブに表示している間だけ、
+        無操作の監視（アプリ全体のイベントフィルタ）を有効にする。"""
+        if self._owner_feat is not None or self._cloud_owner_feat is not None:
+            self._start_privacy_guard()
+        else:
+            self._stop_privacy_guard()
+
+    def _start_privacy_guard(self):
+        if self._idle_watcher is None:
+            self._idle_watcher = IdleWatcher(IDLE_TIMEOUT_MS, self)
+            self._idle_watcher.idled.connect(self._on_user_idle)
+            # 入力イベントの処理中に再描画しないよう、解除は次のイベントループで行う
+            self._idle_watcher.resumed.connect(
+                self._on_user_resumed, Qt.ConnectionType.QueuedConnection)
+        self._idle_watcher.start()
+
+    def _stop_privacy_guard(self):
+        if self._idle_watcher is not None:
+            self._idle_watcher.stop()
+        self._privacy_masked = False
+
+    def _on_user_idle(self):
+        self._set_privacy_masked(True)
+
+    def _on_user_resumed(self):
+        self._set_privacy_masked(False)
+
+    def _set_privacy_masked(self, masked):
+        if masked == self._privacy_masked:
             return
-        parts = ['<table style="border-collapse:collapse;width:100%;">']
+        self._privacy_masked = masked
+        # 再描画でスクロール位置が先頭へ戻らないようにする
+        if self._owner_feat is not None:
+            bar = self.info_browser.verticalScrollBar()
+            pos = bar.value()
+            self._render_gpkg_info(self._owner_feat)
+            bar.setValue(pos)
+        if self._cloud_owner_feat is not None:
+            bar = self.cloud_info_browser.verticalScrollBar()
+            pos = bar.value()
+            self._render_cloud_info()
+            bar.setValue(pos)
+
+    @staticmethod
+    def _info_title_row(title):
+        """情報パネルの見出し行（緑の帯）。基本情報・森林簿など、枠内の先頭に置くタイトルで共通に使う。"""
+        return ('<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
+                f'padding:3px;">{title}</td></tr>')
+
+    def _show_cloud_table_row_info(self, title, table, row, owner_feat=None):
+        """owner_feat を渡すと、クラウドの情報の後に区切りと所有者情報を続ける。"""
+        if table is None or row < 0:
+            self._clear_cloud_record_info()
+            return
+        parts = ['<table style="border-collapse:collapse;width:100%;">',
+                 self._info_title_row(title)]
         for col in range(table.columnCount()):
             header_item = table.horizontalHeaderItem(col)
             item = table.item(row, col)
@@ -1241,12 +1339,38 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;vertical-align:top;">'
                 f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
         parts.append('</table>')
-        self.cloud_info_browser.setHtml(''.join(parts))
+        self._set_cloud_info(parts, owner_feat)
         self.left_tab.setCurrentIndex(1)
 
+    def _set_cloud_info(self, parts, owner_feat=None):
+        """クラウド情報タブへ表を表示する。parts は '</table>' で終わる HTML 断片のリスト。
+        owner_feat を渡すと、末尾に区切りと、計画図レイヤー情報として所有者情報を続ける。"""
+        self._cloud_info_parts = parts
+        self._cloud_owner_feat = owner_feat
+        self._render_cloud_info()
+        self._update_privacy_guard()
+
+    def _render_cloud_info(self):
+        parts = list(self._cloud_info_parts)
+        owner_rows = (self._owner_rows(self._cloud_owner_feat)
+                      if self._cloud_owner_feat is not None else [])
+        if owner_rows:
+            # クラウドの情報の後に区切りを入れ、出どころの違う見出し（緑の帯に対する灰色の帯）を付けて
+            # 所有者情報を続ける
+            parts[-1:-1] = [
+                '<tr><td colspan="2"><hr></td></tr>',
+                '<tr><td colspan="2" style="background:#eeeeee;color:#555555;font-weight:bold;padding:3px;">'
+                f'{_OWNER_SOURCE_TITLE}</td></tr>',
+            ] + owner_rows
+        else:
+            self._cloud_owner_feat = None
+        self.cloud_info_browser.setHtml(''.join(parts))
+
     def _clear_cloud_record_info(self):
-        self.lbl_cloud_selected.setText('右側の表で選択してください')
+        self._cloud_info_parts = []
+        self._cloud_owner_feat = None
         self.cloud_info_browser.clear()
+        self._update_privacy_guard()
 
     # ------------------------------------------------------------------
     # 複数タブで共有する選択ハイライト
@@ -1279,6 +1403,19 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._selection_highlights.append(rb)
         return g.boundingBox()
 
+    def _on_disable_zoom_toggled(self, checked):
+        QSettings().setValue('fcloud_shizuoka/disable_zoom', checked)
+
+    def _fit_canvas_to(self, extent):
+        """表の行選択に伴って、地図を選択位置へ移す。「選択時のズームを無効化」がオンのときは
+        縮尺を変えず、中心だけを extent の中心に合わせる。"""
+        canvas = self.iface.mapCanvas()
+        if self.chk_disable_zoom.isChecked():
+            canvas.setCenter(extent.center())
+        else:
+            canvas.setExtent(extent)
+        canvas.refresh()
+
     def _zoom_to_selection_highlights(self, margin_ratio=0.60, min_padding=5):
         bbox = None
         for rb in self._selection_highlights:
@@ -1298,9 +1435,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         if bbox and not bbox.isEmpty():
             pad = max(bbox.width(), bbox.height()) * margin_ratio + min_padding
             bbox.grow(pad)
-            canvas = self.iface.mapCanvas()
-            canvas.setExtent(bbox)
-            canvas.refresh()
+            self._fit_canvas_to(bbox)
             return True
         return False
 
@@ -1317,12 +1452,15 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 self._apply_selection_color(self._connected_layer)
             self._connect_selection_signal()
             self._on_selection_changed(None, None, None)
+        if self._owner_feat is not None or self._cloud_owner_feat is not None:
+            self._start_privacy_guard()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         if self._suspend_hide_cleanup:
             return  # コンテナ切り替え中の一時的な hide は無視
         self._disconnect_selection_signal()
+        self._stop_privacy_guard()
 
     def _teardown_visible_state(self):
         """ドック純正 ✕ / 別ウィンドウのクローズ時に、選択色・ハイライト・
@@ -1343,6 +1481,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         super().closeEvent(event)
 
     def cleanup_on_unload(self):
+        self._stop_privacy_guard()
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
         except (TypeError, RuntimeError):

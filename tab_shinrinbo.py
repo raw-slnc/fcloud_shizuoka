@@ -517,8 +517,10 @@ class ShinrinboMixin:
         if not item:
             self._clear_cloud_record_info()
             return
-        self._show_cloud_table_row_info('森林簿', self.tbl_shinrinbo, row)
         row_data = item.data(Qt.ItemDataRole.UserRole)
+        # gpkg 型は行の地物を持っている。その小班の所有者情報をクラウドの情報に続けて出す
+        owner_feat = row_data if self._layer_type == 'gpkg' else None
+        self._show_cloud_table_row_info('森林簿', self.tbl_shinrinbo, row, owner_feat)
         if row_data is None:
             return
 

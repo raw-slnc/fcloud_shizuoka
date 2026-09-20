@@ -561,8 +561,7 @@ class KeikakuMixin:
                         bbox.combineExtentWith(b)
             if bbox and not bbox.isEmpty():
                 bbox.grow(max(bbox.width(), bbox.height()) * 0.10)
-                canvas.setExtent(bbox)
-                canvas.refresh()
+                self._fit_canvas_to(bbox)
                 return True
             return False
 

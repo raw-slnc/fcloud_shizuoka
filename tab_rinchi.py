@@ -900,8 +900,7 @@ class RinchiMixin:
                 tr = QgsCoordinateTransform(crs_4326, dst_crs, QgsProject.instance())
                 b = tr.transformBoundingBox(b)
             b.grow(max(b.width(), b.height()) * margin)
-            canvas.setExtent(b)
-            canvas.refresh()
+            self._fit_canvas_to(b)
 
         def _feature_bbox(geom, src_crs):
             if show_feature:
@@ -985,8 +984,7 @@ class RinchiMixin:
 
             if match_bbox and not match_bbox.isEmpty():
                 match_bbox.grow(max(match_bbox.width(), match_bbox.height()) * 0.30)
-                canvas.setExtent(match_bbox)
-                canvas.refresh()
+                self._fit_canvas_to(match_bbox)
                 return
 
         if city_bbox_4326:
@@ -1000,9 +998,8 @@ class RinchiMixin:
                 tr = QgsCoordinateTransform(crs_4326, dst_crs, QgsProject.instance())
                 pt = tr.transform(QgsPointXY(float(x), float(y)))
                 buf = canvas.mapUnitsPerPixel() * 300
-                canvas.setExtent(QgsRectangle(
+                self._fit_canvas_to(QgsRectangle(
                     pt.x() - buf, pt.y() - buf, pt.x() + buf, pt.y() + buf))
-                canvas.refresh()
             except Exception as e:
                 QgsMessageLog.logMessage(
                     f'[fcloud] rinchi highlight-point zoom failed: {e}',

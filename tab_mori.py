@@ -856,7 +856,7 @@ class MoriMixin:
                     ri, gi, bi = int(r * 255), int(g * 255), int(b * 255)
                     sym = QgsFillSymbol.createSimple({
                         'color':         f'{ri},{gi},{bi},160',
-                        'outline_color': f'{max(0,ri-50)},{max(0,gi-50)},{max(0,bi-50)},220',
+                        'outline_color': f'{max(0, ri-50)},{max(0, gi-50)},{max(0, bi-50)},220',
                         'outline_width': '0.4',
                     })
                     kanri_rule = QgsRuleBasedRenderer.Rule(sym)
@@ -904,9 +904,8 @@ class MoriMixin:
         森林クラウド公開システムに合わせ、_MORI_FIELDS の全項目を
         （空欄もそのまま）固定の並びで出す。"""
         from html import escape
-        self.lbl_cloud_selected.setText('森の力')
         if not isinstance(rec, dict):
-            self.cloud_info_browser.clear()
+            self._clear_cloud_record_info()
             return
 
         def _val(keys):
@@ -916,7 +915,8 @@ class MoriMixin:
                     return str(v)
             return ''
 
-        parts = ['<table style="border-collapse:collapse;width:100%;">']
+        parts = ['<table style="border-collapse:collapse;width:100%;">',
+                 self._info_title_row('森の力')]
         for lbl, *keys in _MORI_FIELDS:
             parts.append(
                 '<tr>'
@@ -925,7 +925,7 @@ class MoriMixin:
                 f'<td style="padding:2px 4px;">{escape(_val(keys))}</td>'
                 '</tr>')
         parts.append('</table>')
-        self.cloud_info_browser.setHtml(''.join(parts))
+        self._set_cloud_info(parts)
         self.left_tab.setCurrentIndex(1)
 
     def _on_mori_selected(self):
@@ -984,8 +984,7 @@ class MoriMixin:
             if bbox and not bbox.isEmpty():
                 buf = max(bbox.width(), bbox.height()) * 0.60 + 5
                 bbox.grow(buf)
-                canvas.setExtent(bbox)
-                canvas.refresh()
+                self._fit_canvas_to(bbox)
                 return True
             return False
 
@@ -1041,5 +1040,4 @@ class MoriMixin:
 
         buf = canvas.mapUnitsPerPixel() * 200
         extent = QgsRectangle(pt.x() - buf, pt.y() - buf, pt.x() + buf, pt.y() + buf)
-        canvas.setExtent(extent)
-        canvas.refresh()
+        self._fit_canvas_to(extent)
