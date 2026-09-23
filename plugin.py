@@ -41,6 +41,8 @@ class FcloudShizuoka:
         self.window = FcloudWindow(self.iface, highlights=self._highlights)
         self.dock = FcloudDockWidget(_TITLE, self.iface.mainWindow())
         self.dock.setObjectName('FcloudShizuokaDock')
+        # フロート時のトップレベルウィンドウ（タスクバー・Alt+Tab）に出るアイコン
+        self.dock.setWindowIcon(QIcon(os.path.join(PLUGIN_DIR, 'icon.png')))
         self.dock.setAllowedAreas(
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
         )

@@ -361,7 +361,7 @@
 <main>
 
   <h1>Fcloud Shizuoka 操作マニュアル</h1>
-  <p class="subtitle">バージョン 0.1.4 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
+  <p class="subtitle">QGIS 3.14 以上対応</p>
 
   <!-- ── 概要 ── -->
   <span class="section-anchor" id="overview"></span>
@@ -419,7 +419,7 @@
   <table>
     <tr><th>項目</th><th>要件</th></tr>
     <tr><td>QGIS バージョン</td><td>3.14 以上</td></tr>
-    <tr><td>動作確認環境</td><td>QGIS 3.40.10（Windows・Linux）</td></tr>
+    <tr><td>動作確認環境</td><td>QGIS 3.44.14（Windows・Linux）</td></tr>
     <tr><td>インターネット接続</td><td>必須（API・MVTタイルへのアクセス）</td></tr>
     <tr><td>GeoPackageまたはShapefile</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ<br>または静岡県配布の森林計画図SHPファイル</td></tr>
     <tr><td>対象地域</td><td>静岡県内のみ</td></tr>
@@ -465,61 +465,72 @@
   <h2>画面構成</h2>
 
   <div class="ui-diagram">
-    <div class="ui-top">
+    <div class="ui-top" style="border-bottom:none;">
       <!-- 左パネル -->
-      <div class="ui-left-panel">
+      <div class="ui-left-panel" style="width:240px; min-width:240px; display:flex; flex-direction:column;">
         <div class="ui-panel-header">左パネル（情報表示）</div>
         <div style="padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 11px; display:flex; align-items:center; gap:6px;">
-          <span style="color:var(--muted);">GPKGレイヤー:</span>
+          <span style="color:var(--muted);">計画図レイヤー:</span>
           <span class="ui-combo">forest_1.gpkg ▾</span>
         </div>
         <div class="ui-tab-bar">
           <div class="ui-tab active">選択中の小班</div>
           <div class="ui-tab">クラウド情報</div>
+          <div style="margin-left:auto; align-self:center; font-size:10px; color:#1a5fb4; text-decoration:underline;">マニュアル</div>
         </div>
-        <div class="ui-panel-body" style="font-size:11px;">
-          <div style="color:var(--green-dark); font-weight:bold; margin-bottom:6px;">小班: 001-001-A</div>
-          <div style="color:var(--muted);">市町村 ／ 林班 ／ 樹種 ／ 林齢<br>施業履歴 など…</div>
+        <div class="ui-panel-body" style="flex:1; padding:0; font-size:11px; display:flex; flex-direction:column;">
+          <div style="flex:1; margin:6px; border:1px solid var(--border);">
+            <div style="background:var(--green-light); color:var(--green-dark); font-weight:bold; padding:3px 6px;">基本情報</div>
+            <div style="padding:6px;">市町村 ／ 林班 ／ 小班<br>樹種 ／ 林齢 など<br>所有者情報（列がある場合）</div>
+            <div style="background:var(--green-light); color:var(--green-dark); font-weight:bold; padding:3px 6px;">施業履歴</div>
+            <div style="padding:6px;">施業年度 ／ 施業方法 など</div>
+          </div>
+          <div style="padding:0 8px 6px; font-weight:bold; color:var(--green-dark);">小班: 001-001-A</div>
         </div>
+        <div style="padding:3px 10px; font-size:10px; color:var(--muted); border-top:1px solid var(--border);">Developed by Avid Tree Work</div>
       </div>
       <!-- 右パネル -->
-      <div class="ui-right-panel">
+      <div class="ui-right-panel" style="display:flex; flex-direction:column;">
         <div class="ui-panel-header">右パネル（森林クラウド検索）</div>
-        <div class="ui-tab-bar">
-          <div class="ui-tab active">保安林台帳</div>
-          <div class="ui-tab">整備事業</div>
-          <div class="ui-tab">森の力</div>
-          <div class="ui-tab">経営計画</div>
-          <div class="ui-tab">林地開発</div>
-        </div>
-        <div class="ui-panel-body" style="font-size:11px;">
-          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
-            <span class="ui-combo">市町村 ▾</span>
-            <span class="ui-combo">大字 ▾</span>
-            <span class="ui-combo">地番</span>
-            <span class="ui-btn">検索</span>
+        <div class="ui-tab-bar" style="flex-wrap:wrap;">
+          <div class="ui-tab active" style="padding:5px 6px;">森林簿</div>
+          <div class="ui-tab" style="padding:5px 6px;">保安林台帳</div>
+          <div class="ui-tab" style="padding:5px 6px;">整備事業</div>
+          <div class="ui-tab" style="padding:5px 6px;">森の力</div>
+          <div class="ui-tab" style="padding:5px 6px;">経営計画</div>
+          <div class="ui-tab" style="padding:5px 6px;">林地開発</div>
+          <div style="margin-left:auto; align-self:center; display:flex; gap:8px; font-size:10px; color:#333;">
+            <span>☐ 全画面表示</span>
           </div>
-          <div style="color:var(--muted);">検索結果テーブル（行選択でハイライト表示）</div>
+        </div>
+        <div class="ui-panel-body" style="flex:1; font-size:11px;">
+          <div style="display:flex; margin-bottom:8px;">
+            <span class="ui-btn" style="margin-left:auto;">公図連携OFF</span>
+          </div>
+          <div style="color:var(--muted);">選択した小班の森林簿の表（行選択でハイライト表示）</div>
+        </div>
+        <div class="ui-bottom" style="flex-wrap:wrap; gap:6px 8px;">
+          <span>レイヤー追加:</span>
+          <span class="ui-btn">林道</span>
+          <span style="margin-left:auto;"></span>
+          <span class="ui-btn">データについて</span>
+          <span class="ui-btn">ローカル保存</span>
+          <span>取得日時: —</span>
+          <span class="ui-btn">更新</span>
         </div>
       </div>
-    </div>
-    <div class="ui-bottom">
-      <span>レイヤー追加:</span>
-      <span class="ui-btn">林道</span>
-      <span style="margin-left:auto;"></span>
-      <span class="ui-btn">ローカル保存</span>
-      <span>取得日時: 2026-05-16 10:30</span>
-      <span class="ui-btn">更新</span>
     </div>
   </div>
 
   <table>
     <tr><th>エリア</th><th>内容</th></tr>
     <tr><td><strong>左パネル上部</strong></td><td>接続する GeoPackage レイヤー/SHPレイヤーを選択するコンボボックス</td></tr>
+    <tr><td><strong>左パネルのタブの右側</strong></td><td>「マニュアル」: このマニュアルを開くリンク</td></tr>
     <tr><td><strong>左パネル「選択中の小班」タブ</strong></td><td>地図上で選択したフィーチャーの森林簿属性を表示</td></tr>
     <tr><td><strong>左パネル「クラウド情報」タブ</strong></td><td>右パネルの表で選択した行の詳細情報を表示</td></tr>
-    <tr><td><strong>右パネル</strong></td><td>保安林台帳・森の力・経営計画・林地開発の検索・表示</td></tr>
-    <tr><td><strong>下部バー</strong></td><td>レイヤー追加ボタン、キャッシュ操作</td></tr>
+    <tr><td><strong>右パネル</strong></td><td>森林簿・保安林台帳・森の力・経営計画・林地開発の表示・検索（整備事業タブは、森林クラウド側が未実装のため使えません）</td></tr>
+    <tr><td><strong>右パネルのタブの右側</strong></td><td>「全画面表示」: パネルをフロート（QGIS 本体から切り離した状態）にしているときだけ使えます。ウィンドウを最大化表示します。</td></tr>
+    <tr><td><strong>右パネル下部のバー</strong></td><td>レイヤー追加ボタン（林道）、データについて、キャッシュ操作（ローカル保存・更新）</td></tr>
   </table>
 
   <!-- ── GPKG接続 ── -->
@@ -574,6 +585,24 @@
   <div class="tip">
     「公図連携 ON/OFF」ボタンを ON にすると、行選択のたびに kozu_xml_integrator へ大字・地番を自動送信します
     （詳細は<a href="#kozu">公図連携</a>参照）。
+  </div>
+
+  <h3>所有者情報の表示と自動伏せ字</h3>
+  <p>
+    「森林簿属性を含む GeoPackage」に <code>登記所有者_漢字</code>（名前）と <code>登記所有者_住所</code>（住所）の列がある場合、
+    小班を選択すると、「選択中の小班」タブの基本情報の末尾に「所有者情報」として名前と住所を表示します。
+    「CDのみの GeoPackage」と「森林計画図SHP」では表示しません。
+  </p>
+  <p>
+    所有者情報は取り扱いに注意が必要な情報のため、<strong>QGIS で約 3 分間操作がないと、名前と住所を「＊＊＊＊＊＊＊」に自動で伏せます</strong>。
+    QGIS 上でマウスやキーを操作すると、元の表示に戻ります（他のアプリケーションでの操作は含みません）。
+    伏せている間は、「全項目をコピー」などのコピー操作でも、伏せ字のままコピーされます。
+  </p>
+
+  <div class="warn">
+    簡易的な覗き見対策です。操作すれば元に戻るため、席を離れるときは OS の画面ロックを併用してください。
+    同じ列の内容は、QGIS 標準の属性テーブルや識別結果にも表示されますが、これらは伏せ字の対象外です。
+    伏せ字になる前にクリップボードへコピーした内容も対象外です。
   </div>
 
   <hr>

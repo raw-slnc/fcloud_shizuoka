@@ -605,7 +605,7 @@ class HoanrinMixin:
 
             cloud_area_str = str(rec.get('面積', '') or rec.get('指定面積', ''))
             gpkg_ha = gpkg_area.get((rec_daiji, chiban1, chiban2),
-                      gpkg_area.get((rec_daiji, chiban1, ''), None))
+                                    gpkg_area.get((rec_daiji, chiban1, ''), None))
             gpkg_ha_str = f'{gpkg_ha:.4f}' if gpkg_ha is not None else '—'
             try:
                 ratio = float(cloud_area_str) / gpkg_ha if gpkg_ha else None
@@ -749,8 +749,8 @@ class HoanrinMixin:
             to_show = [(f, _HL_BLUE_BORDER,   _HL_BLUE_FILL)   for f in blue_feats]
         elif yellow_feats or (kinbo_on and red_feats):
             to_show = ([(f, _HL_YELLOW_BORDER, _HL_YELLOW_FILL) for f in yellow_feats]
-                     + ([(f, _HL_RED_BORDER,   _HL_RED_FILL)    for f in red_feats]
-                        if kinbo_on else []))
+                       + ([(f, _HL_RED_BORDER,   _HL_RED_FILL)    for f in red_feats]
+                          if kinbo_on else []))
         elif kinbo_on and orange_feats:
             to_show = [(f, _HL_ORANGE_BORDER, _HL_ORANGE_FILL) for f in orange_feats]
         else:
@@ -795,9 +795,8 @@ class HoanrinMixin:
     # ------------------------------------------------------------------
 
     def _show_hoanrin_record_info(self, rec):
-        self.lbl_cloud_selected.setText('保安林台帳')
         if not isinstance(rec, dict):
-            self.cloud_info_browser.clear()
+            self._clear_cloud_record_info()
             return
 
         hidden_exact = {
@@ -832,7 +831,8 @@ class HoanrinMixin:
             ordered_keys.append(key)
             seen.add(key)
 
-        parts = ['<table style="border-collapse:collapse;width:100%;">']
+        parts = ['<table style="border-collapse:collapse;width:100%;">',
+                 self._info_title_row('保安林台帳')]
         for key in ordered_keys:
             val = chiban_disp if key == '地番' else rec.get(key)
             parts.append(
