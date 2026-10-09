@@ -8,6 +8,7 @@ from qgis.PyQt.QtCore import Qt, QTimer, QSettings
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsProject
 from .layer_cleanup import remove_project_layer
+from .tab_opendata import _is_od_group
 
 PLUGIN_DIR = os.path.dirname(__file__)
 _TITLE = '静岡県森林クラウド'
@@ -74,20 +75,33 @@ class FcloudShizuoka:
             self.dock.hide()
 
     def _remove_stale_layers(self, *args):
+        """プロジェクトに保存されて残ったプラグイン由来のレイヤーを外す
+        （起動時・プロジェクトを開いたとき）。"""
         stale_names = {
-            'fcloud_林道', 'fcloud_森の力実施箇所',
-            'fcloud_経営計画作成箇所', '林地開発_許可', '林地開発_連絡調整',
+            'fcloud_林道', 'fcloud_森の力実施箇所', 'fcloud_経営計画作成箇所',
+            'fcloud_林地開発', '林地開発_許可', '林地開発_連絡調整',
         }
         project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        # グループごと作るもの（林地開発の旧版・森林資源情報）は、中のレイヤーも外す
+        groups = [
+            g for g in root.findGroups(True)
+            if g.name() == '林地開発' or _is_od_group(g.name())
+        ]
+        for grp in groups:
+            if sip.isdeleted(grp):
+                continue  # 先に外したグループの中にあった場合
+            for node in grp.findLayers():
+                remove_project_layer(project, node.layerId())
+            parent = grp.parent()
+            if parent is not None:
+                parent.removeChildNode(grp)
         to_remove = [
             lid for lid, layer in list(project.mapLayers().items())
             if layer.name() in stale_names
         ]
         for lid in to_remove:
             remove_project_layer(project, lid)
-        root = project.layerTreeRoot()
-        while root.findGroup('林地開発'):
-            root.removeChildNode(root.findGroup('林地開発'))
 
     def unload(self):
         try:

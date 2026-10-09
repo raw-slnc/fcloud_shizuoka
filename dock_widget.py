@@ -38,6 +38,7 @@ from .tab_mori      import MoriMixin
 from .tab_keikaku   import KeikakuMixin
 from .tab_rinchi    import RinchiMixin
 from .tab_shinrinbo import ShinrinboMixin
+from .tab_opendata  import OpendataMixin
 
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
@@ -150,7 +151,7 @@ class FcloudDock(QDockWidget):
         super().closeEvent(event)
 
 
-class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, QWidget):
+class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, OpendataMixin, QWidget):
     _TAB_ORDER_VERSION = 2
 
     def __init__(self, iface, highlights=None, parent=None):
@@ -339,10 +340,14 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.cloud_tab.addTab(self._build_tab_mori(),      '森の力')
         self.cloud_tab.addTab(self._build_tab_keikaku(),   '経営計画')
         self.cloud_tab.addTab(self._build_tab_rinchi(),    '林地開発')
+        self.cloud_tab.addTab(self._build_tab_opendata(),  '森林資源情報')
 
         self.chk_disable_zoom = QCheckBox('選択時のズームを無効化')
         self.chk_disable_zoom.setToolTip('表の行を選択したとき、地図の縮尺は変えず、中心だけを選択位置に合わせる')
         self.chk_disable_zoom.toggled.connect(self._on_disable_zoom_toggled)
+        self.chk_lock_view = QCheckBox('画面ロック')
+        self.chk_lock_view.setToolTip('表の行を選択しても、地図を動かさない（パン・ズームをしない）')
+        self.chk_lock_view.toggled.connect(self._on_lock_view_toggled)
         self.chk_separate_window = QCheckBox('別ウィンドウ')
         self.chk_separate_window.setToolTip('パネルを QGIS 本体から独立した別ウィンドウで表示する')
         self.chk_separate_window.toggled.connect(self._on_window_mode_toggled)
@@ -350,6 +355,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         _corner_l = QHBoxLayout(_corner_w)
         _corner_l.setContentsMargins(0, 3, 0, 3)
         _corner_l.addWidget(self.chk_disable_zoom)
+        _corner_l.addWidget(self.chk_lock_view)
         _corner_l.addWidget(self.chk_separate_window)
         self.cloud_tab.setCornerWidget(_corner_w, Qt.Corner.TopRightCorner)
 
@@ -365,7 +371,8 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self.btn_rindo = QPushButton('林道')
         self.btn_rindo.setCheckable(True)
         self.btn_rindo.setToolTip('林道 MVT レイヤーを追加/除去')
-        self.btn_rindo.setStyleSheet(_TOGGLE_BTN_QSS_LAYER)
+        self.btn_rindo.setStyleSheet(
+            _TOGGLE_BTN_QSS_LAYER + 'QPushButton{padding:2px 10px;}')
         bottom_row.addWidget(self.btn_rindo)
 
         self.btn_bg_cs3d = QPushButton(_BG_CS3D_NAME)
@@ -420,9 +427,16 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         QMessageBox.information(
             self,
             'データについて',
-            '表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、'
+            '・表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、'
             '静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、'
-            'QGIS 上で参照しやすいよう取得・加工・編集して表示しています。',
+            'QGIS 上で参照しやすいよう取得・加工・編集して表示しています。\n\n'
+            '・森林資源情報タブのデータは、静岡県 航空レーザ解析業務委託 解析データ'
+            '（G空間情報センター「静岡県森林資源解析データ」、公共データ利用規約（第1.0版））を'
+            'もとに、本プラグインが取得・加工して表示しています（静岡県が作成した表示ではありません）。'
+            '航空レーザ計測をもとにした計測時点の目安であり、現在の森林の状況を示すものではありません。\n\n'
+            '・本プラグインの表示は、既存の情報を重ね合わせて閲覧するための参考資料です。'
+            '申請・境界の確定・権利関係の判断などの根拠には使用しないでください。'
+            '判断は利用者の責任で行ってください。',
         )
 
     def _open_manual(self):
@@ -626,6 +640,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 remove_project_layer(project, found_id)
 
     def _cleanup_plugin_layers(self):
+        self._od_remove_display()
         self._remove_mori_vector_layer()
         self._remove_keikaku_vector_layer()
         self._remove_rinchi_layers()
@@ -728,10 +743,16 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         if 0 <= tab < self.cloud_tab.count():
             self.cloud_tab.setCurrentIndex(tab)
         # 状態の復元だけなので、保存処理（toggled）は走らせない
+        disable_zoom = s.value('fcloud_shizuoka/disable_zoom', False, type=bool)
+        lock_view = s.value('fcloud_shizuoka/lock_view', False, type=bool)
+        if disable_zoom and lock_view:
+            disable_zoom = False  # 排他。両方保存されていたら画面ロックを優先する
         self.chk_disable_zoom.blockSignals(True)
-        self.chk_disable_zoom.setChecked(
-            s.value('fcloud_shizuoka/disable_zoom', False, type=bool))
+        self.chk_disable_zoom.setChecked(disable_zoom)
         self.chk_disable_zoom.blockSignals(False)
+        self.chk_lock_view.blockSignals(True)
+        self.chk_lock_view.setChecked(lock_view)
+        self.chk_lock_view.blockSignals(False)
 
     @staticmethod
     def _migrate_tab_index(tab):
@@ -748,6 +769,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
     def _on_tab_changed(self, index):
         prev = self._prev_tab_index
         needs_refresh = False
+        if prev == 6 and index != 6:
+            self._clear_selection_highlights()
+            self._od_on_tab_hidden()  # 左パネルを「クラウド情報」に戻す
         if prev == 0 and index != 0:
             self._clear_selection_highlights()
         elif prev == 3 and index != 3:
@@ -809,6 +833,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             db = self._get_db('林地開発')
             ts = db.get_fetched_at(self._RINCHI_ALL_CACHE_KEY) if db else None
             self.lbl_cache_ts.setText(f'取得日時: {ts}' if ts else '取得日時: —')
+        elif index == 6:
+            # 森林資源情報（オープンデータ）: 取得状況は _od_update_bottom_ts が書く
+            self._od_on_tab_shown()
         else:
             self.lbl_cache_ts.setText('取得日時: —')
         self._update_cache_btn_states()
@@ -855,8 +882,8 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             # 経営計画: APIから取得すると同時にGPKGへ自動保存 → ローカル保存は常に無効
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(not no_data)
-        elif tab == 2:
-            # 整備事業: 未実装
+        elif tab in (2, 6):
+            # 整備事業: 未実装 ／ 森林資源情報: 取得・保存はタブ内の「取得」で行う
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
         elif tab == 0:
@@ -917,6 +944,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         QgsProject.instance().layersAdded.connect(self._update_bg_cs3d_btn_state)
         QgsProject.instance().layersRemoved.connect(self._update_bg_cs3d_btn_state)
         QgsProject.instance().readProject.connect(self._on_project_read)
+        QgsProject.instance().writeProject.connect(self._on_project_write)
         # 注意: iface.currentLayerChanged にはあえて接続しない。
         # レイヤーパネルでのクリックにプラグインの接続先が追従すると、
         # 意図せず接続GPKGが切り替わってしまうため。
@@ -1028,7 +1056,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 self.iface.setActiveLayer(layer)
                 if self.isVisible():
                     self._connect_selection_signal()
-                self._apply_selection_color(layer)
+                    # 選択色はプラグインの画面を開いているあいだだけ変える。QGIS の起動時
+                    # （プロジェクトを開いて前回のレイヤーにつながるとき）には変えない
+                    self._apply_selection_color(layer)
                 flds = [f.name() for f in layer.fields()]
                 if '市町村名称' in flds:
                     self._layer_type = 'gpkg'
@@ -1042,7 +1072,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._update_keikaku_load_btn()
 
     # ------------------------------------------------------------------
-    # 連携レイヤーの選択ハイライト（塗り20%に変更・復元）
+    # 連携レイヤーの選択ハイライト（塗り35%に変更・復元）
     # ------------------------------------------------------------------
 
     def _apply_selection_color(self, layer):
@@ -1053,14 +1083,31 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         from qgis.core import Qgis
         sp = layer.selectionProperties()
         self._sel_color_layer_id = layer.id()
-        self._sel_color_orig = QColor(sp.selectionColor())  # invalidな場合はコピーもinvalid
-        self._sel_mode_orig = sp.selectionRenderingMode()
+        cur = sp.selectionColor()
+        cur_mode = sp.selectionRenderingMode()
+        # 接続したままプロジェクトを保存した・QGIS が落ちた等で、このプラグインが付けた設定
+        # （色を上書き・黄色・塗り20%/35%）が残っている場合は、元の設定をデフォルトとみなす。
+        # 利用者が独自に付けた選択の設定は、そのまま覚えて外すときに戻す。
+        leftover = (
+            cur_mode == Qgis.SelectionRenderingMode.CustomColor
+            and cur.isValid()
+            and (cur.red(), cur.green(), cur.blue()) == (255, 255, 0)
+            and any(abs(cur.alphaF() - a) < 0.01 for a in (0.2, 0.35))
+        )
+        if leftover:
+            self._sel_color_orig = QColor()  # invalid＝色の指定なし（デフォルト）
+            self._sel_mode_orig = Qgis.SelectionRenderingMode.Default
+        else:
+            self._sel_color_orig = QColor(cur)  # invalidな場合はコピーもinvalid
+            self._sel_mode_orig = cur_mode
 
+        # レイヤーの選択色は「色を上書き」のときだけ使われる。それ以外のモードで残っている色
+        # （以前の設定の名残など）は表示に使われていないので、プロジェクトの選択色を元にする
         base = sp.selectionColor()
-        if not base.isValid():
+        if cur_mode != Qgis.SelectionRenderingMode.CustomColor or not base.isValid():
             base = QgsProject.instance().selectionColor()
         faded = QColor(base)
-        faded.setAlphaF(0.2)
+        faded.setAlphaF(0.35)
         sp.setSelectionColor(faded)
         # selectionColor は selectionRenderingMode が CustomColor でないと反映されない
         sp.setSelectionRenderingMode(Qgis.SelectionRenderingMode.CustomColor)
@@ -1080,6 +1127,39 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._sel_color_layer_id = None
         self._sel_color_orig = None
         self._sel_mode_orig = None
+
+    def _on_project_write(self, doc):
+        # 接続中に保存すると塗り35%の選択色がプロジェクトファイルに残り、プラグインを
+        # 使わずに開くと戻せなくなる。画面の表示はそのままにして、書き出す XML の
+        # <selection> だけを変更前の設定に差し替える。
+        if not self._sel_color_layer_id:
+            return
+        layer = QgsProject.instance().mapLayer(self._sel_color_layer_id)
+        if not layer or sip.isdeleted(layer):
+            return
+        from qgis.core import QgsMapLayerSelectionProperties, QgsReadWriteContext
+        maplayers = doc.elementsByTagName('maplayer')
+        for i in range(maplayers.count()):
+            elem = maplayers.at(i).toElement()
+            if elem.firstChildElement('id').text() != self._sel_color_layer_id:
+                continue
+            old_sel = elem.firstChildElement('selection')
+            if old_sel.isNull():
+                return
+            orig = QgsMapLayerSelectionProperties()
+            orig.setSelectionColor(self._sel_color_orig or QColor())
+            orig.setSelectionRenderingMode(self._sel_mode_orig)
+            symbol = layer.selectionProperties().selectionSymbol()
+            if symbol is not None:
+                orig.setSelectionSymbol(symbol.clone())
+            context = QgsReadWriteContext()
+            context.setPathResolver(QgsProject.instance().pathResolver())
+            scratch = doc.createElement('scratch')
+            orig.writeXml(scratch, doc, context)
+            new_sel = scratch.firstChildElement('selection')
+            if not new_sel.isNull():
+                elem.replaceChild(new_sel, old_sel)
+            return
 
     # 市町村コンボは接続レイヤーの属性からは作らない:
     #   ・保安林: _apply_hoanrin_city_filter（現行市町村の固定リスト）
@@ -1112,6 +1192,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.info_browser.clear()
             self._track_owner_info(None)
             self._refresh_shinrinbo_tab([])
+            self._od_on_plan_selection()
             return
         feat = features[0]
         fnames = feat.fields().names()
@@ -1131,6 +1212,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._show_feature_info(feat)
         self.left_tab.setCurrentIndex(0)
         self._refresh_shinrinbo_tab(features)
+        self._od_on_plan_selection()
 
     # ------------------------------------------------------------------
     # 重なり地物の自動追加選択（地点包含ベース）
@@ -1371,6 +1453,12 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._cloud_owner_feat = None
         self.cloud_info_browser.clear()
         self._update_privacy_guard()
+        # 資源情報タブを開いている間は、この欄は「資源情報」の表示に使っている。小班の選択などで
+        # ほかのタブの処理が欄を空にしたら、資源情報を描き直す（タブを開いていなければ何もしない）。
+        # 画面を作る途中・終了処理中は資源情報タブの部品が無いことがあるので、そのときは描かない
+        combo = getattr(self, 'combo_od_no', None)
+        if combo is not None and not sip.isdeleted(combo) and not getattr(self, '_od_shutting_down', False):
+            self._od_render_left()
 
     # ------------------------------------------------------------------
     # 複数タブで共有する選択ハイライト
@@ -1398,6 +1486,11 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         rb.setColor(_HL_SEL_BORDER)
         rb.setFillColor(_HL_SEL_FILL)
         rb.setWidth(2)
+        if rb_type == QgsWkbTypes.GeometryType.PointGeometry:
+            # 点は既定の印が小さく見つけにくいので、大きめの丸にする
+            rb.setIcon(QgsRubberBand.IconType.ICON_CIRCLE)
+            rb.setIconSize(16)
+            rb.setWidth(3)
         rb.setToGeometry(g)
         rb.show()
         self._selection_highlights.append(rb)
@@ -1405,10 +1498,19 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
     def _on_disable_zoom_toggled(self, checked):
         QSettings().setValue('fcloud_shizuoka/disable_zoom', checked)
+        if checked and self.chk_lock_view.isChecked():
+            self.chk_lock_view.setChecked(False)  # 画面ロックとは排他
+
+    def _on_lock_view_toggled(self, checked):
+        QSettings().setValue('fcloud_shizuoka/lock_view', checked)
+        if checked and self.chk_disable_zoom.isChecked():
+            self.chk_disable_zoom.setChecked(False)  # 選択時のズームを無効化とは排他
 
     def _fit_canvas_to(self, extent):
         """表の行選択に伴って、地図を選択位置へ移す。「選択時のズームを無効化」がオンのときは
-        縮尺を変えず、中心だけを extent の中心に合わせる。"""
+        縮尺を変えず、中心だけを extent の中心に合わせる。「画面ロック」がオンのときは動かさない。"""
+        if self.chk_lock_view.isChecked():
+            return
         canvas = self.iface.mapCanvas()
         if self.chk_disable_zoom.isChecked():
             canvas.setCenter(extent.center())
@@ -1432,6 +1534,13 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 bbox = b
             else:
                 bbox.combineExtentWith(b)
+        if bbox is not None and bbox.width() == 0 and bbox.height() == 0:
+            # 点1つは外接矩形の幅・高さが0で範囲を決められないので、縮尺は変えず中心だけ移す
+            if not self.chk_lock_view.isChecked():
+                canvas = self.iface.mapCanvas()
+                canvas.setCenter(bbox.center())
+                canvas.refresh()
+            return True
         if bbox and not bbox.isEmpty():
             pad = max(bbox.width(), bbox.height()) * margin_ratio + min_padding
             bbox.grow(pad)
@@ -1460,6 +1569,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         if self._suspend_hide_cleanup:
             return  # コンテナ切り替え中の一時的な hide は無視
         self._disconnect_selection_signal()
+        # 画面を隠したら選択色を元に戻す。QGIS の起動時に前回の画面が一瞬表示されて
+        # すぐ隠される場合も、変えたままにしない（次に表示したときに改めて変える）
+        self._restore_selection_color()
         self._stop_privacy_guard()
 
     def _teardown_visible_state(self):
@@ -1482,8 +1594,13 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
     def cleanup_on_unload(self):
         self._stop_privacy_guard()
+        self._od_cancel_all()
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
+        except (TypeError, RuntimeError):
+            pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
+        try:
+            QgsProject.instance().writeProject.disconnect(self._on_project_write)
         except (TypeError, RuntimeError):
             pass  # 未接続時のTypeError/削除済みオブジェクトのRuntimeErrorは想定内
         # 終了処理中はプロジェクトのレイヤーが一斉に破棄されlayersAdded/layersRemoved

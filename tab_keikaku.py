@@ -55,7 +55,7 @@ class KeikakuMixin:
     def _should_show_keikaku_layer(self):
         return (
             self._keikaku_layer_requested_on()
-            and self.cloud_tab.currentIndex() == 3
+            and self.cloud_tab.currentIndex() == 4
             and self.isVisible()
         )
 
@@ -145,7 +145,7 @@ class KeikakuMixin:
             # 全県GPKGあり → タブ選択時に読み込む
             self.btn_keikaku_load.setEnabled(False)
             self.btn_keikaku_layer.setEnabled(True)
-            if self.cloud_tab.currentIndex() == 3 and self.isVisible():
+            if self.cloud_tab.currentIndex() == 4 and self.isVisible():
                 self._sync_keikaku_layer_visibility(ensure_loaded=True)
             else:
                 self._remove_keikaku_vector_layer()
@@ -154,7 +154,7 @@ class KeikakuMixin:
         else:
             # 未取得 → タブ選択時に取得、手動読み込みも可
             self.btn_keikaku_load.setEnabled(True)
-            self.btn_keikaku_layer.setEnabled(self.cloud_tab.currentIndex() == 3)
+            self.btn_keikaku_layer.setEnabled(self.cloud_tab.currentIndex() == 4)
             self._remove_keikaku_vector_layer()
             self.tbl_keikaku.setRowCount(0)
             self.lbl_keikaku_count.setStyleSheet('color: gray; font-size: 10px;')

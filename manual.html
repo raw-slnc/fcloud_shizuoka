@@ -82,6 +82,17 @@
   h1 { font-size: 26px; color: var(--accent); margin-bottom: 6px; }
   h2 { font-size: 19px; color: var(--green-dark); margin: 40px 0 14px; padding-bottom: 6px; border-bottom: 2px solid var(--border); }
   h3 { font-size: 15px; color: var(--green-dark); margin: 24px 0 10px; }
+  details.fold {
+    border: 1px solid var(--border); border-radius: 6px; margin: 14px 0;
+    background: var(--white);
+  }
+  details.fold > summary {
+    cursor: pointer; padding: 8px 14px; font-weight: bold; color: var(--green-dark);
+    background: var(--green-pale); border-radius: 6px;
+  }
+  details.fold[open] > summary { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; }
+  details.fold > .fold-body { padding: 4px 16px 10px; font-size: 13px; line-height: 1.7; }
+  details.fold > .fold-body ul { margin: 4px 0 8px; }
   h4 { font-size: 13px; color: var(--accent); margin: 16px 0 6px; }
 
   p { line-height: 1.75; margin-bottom: 10px; }
@@ -113,7 +124,11 @@
   .note  { background: #e8f4fd; border-left: 4px solid #2196f3; }
   .tip   { background: var(--green-light); border-left: 4px solid var(--green-mid); }
   .warn  { background: #fff3e0; border-left: 4px solid #ff9800; }
-  .note::before { content: '📌 '; }
+  .notice {
+    background: var(--green-pale); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 16px; margin: 14px 0;
+    font-size: 13px; line-height: 1.7; color: var(--text);
+  }  .note::before { content: '📌 '; }
   .tip::before  { content: '💡 '; }
   .warn::before { content: '⚠️ '; }
 
@@ -298,6 +313,7 @@
     .card-row,
     .ui-diagram,
     .legend-table,
+    .note, .tip, .warn,
     table {
       page-break-inside: avoid;
       break-inside: avoid;
@@ -313,7 +329,6 @@
       text-decoration: none;
     }
 
-    #install,
     #rinchi,
     #cache {
       page-break-before: always;
@@ -321,6 +336,19 @@
     }
 
     .print-page-break {
+      page-break-before: always;
+      break-before: always;
+    }
+
+    /* 改ページする節の直前の区切り線と、ページ内リンク用の目印（余白を持つ）は、
+       前のページに線や余白だけが残って白紙のページができるので印刷しない */
+    hr:has(+ .section-anchor + .print-page-break),
+    hr:has(+ #rinchi),
+    hr:has(+ #cache) {
+      display: none;
+    }
+    .section-anchor { display: none; }
+    #rinchi + h2, #cache + h2 {
       page-break-before: always;
       break-before: always;
     }
@@ -338,8 +366,6 @@
   <ul>
     <li class="section">はじめに</li>
     <li><a href="#overview">概要</a></li>
-    <li><a href="#requirements">動作要件</a></li>
-    <li><a href="#install">インストール</a></li>
     <li class="section">基本操作</li>
     <li><a href="#ui">画面構成</a></li>
     <li><a href="#connect">GPKGレイヤー接続</a></li>
@@ -349,11 +375,15 @@
     <li class="sub"><a href="#mori">森の力</a></li>
     <li class="sub"><a href="#keikaku">経営計画</a></li>
     <li class="sub"><a href="#rinchi">林地開発</a></li>
+    <li class="sub"><a href="#shigen">森林資源情報</a></li>
     <li class="section">機能解説</li>
     <li><a href="#highlight">ハイライト凡例</a></li>
     <li><a href="#kozu">公図連携（kozu_xml_integrator）</a></li>
     <li><a href="#cache">キャッシュ機能</a></li>
     <li><a href="#layers">レイヤー追加</a></li>
+    <li class="section">導入</li>
+    <li><a href="#requirements">動作要件</a></li>
+    <li><a href="#install">インストール</a></li>
   </ul>
 </nav>
 
@@ -361,25 +391,34 @@
 <main>
 
   <h1>Fcloud Shizuoka 操作マニュアル</h1>
-  <p class="subtitle">バージョン 0.1.4 &nbsp;／&nbsp; QGIS 3.14 以上対応</p>
+  <p class="subtitle">QGIS 4.0 以上対応</p>
 
   <!-- ── 概要 ── -->
   <span class="section-anchor" id="overview"></span>
   <h2>概要</h2>
-  <p>
-    本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
-    静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
-    QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
-  </p>
-
-  <hr class="hr-tight">
-
   <p>
     <strong>Fcloud Shizuoka</strong> は、静岡県森林クラウド（fcloud.pref.shizuoka.jp）の公開APIと、
     Shinrinbo Code Converter が生成した森林簿 GeoPackage を連携させる QGIS プラグインです。
     ドックパネルから保安林台帳・森の力再生事業・経営計画・林地開発の情報を検索・閲覧し、
     地図上でフィーチャーをハイライト表示できます。
   </p>
+
+  <hr class="hr-tight">
+
+  <div class="notice">
+    <p>
+      ・本プラグインで表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、
+      静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、
+      QGIS 上で参照しやすいよう取得・加工・編集して表示しています。
+    </p>
+    <p>
+      ・本プラグインの表示は、既存の情報を重ね合わせて閲覧するための参考資料です。
+      申請・境界の確定・権利関係の判断などの根拠には使用しないでください。
+      判断は利用者の責任で行ってください。
+    </p>
+  </div>
+
+  <hr class="hr-tight">
 
   <div class="card-row">
     <div class="card">
@@ -389,6 +428,7 @@
         <li>森の力再生事業の検索・実施箇所レイヤー表示</li>
         <li>経営計画の読み込み・計画箇所レイヤー表示</li>
         <li>林地開発（許可・連絡調整）の検索</li>
+        <li>森林資源情報（航空レーザ解析のオープンデータ）の取得・表示</li>
         <li>API取得データのローカルキャッシュ</li>
       </ul>
     </div>
@@ -399,6 +439,7 @@
         <li>静岡県配布の森林計画図SHP</li>
         <li>静岡県森林クラウド公開API</li>
         <li>MVT（Mapbox Vector Tiles）形式の地理データ</li>
+        <li>G空間情報センター「静岡県森林資源解析データ」</li>
       </ul>
     </div>
   </div>
@@ -412,53 +453,6 @@
     完全な機能（小班情報パネル含む）を利用するには、Shinrinbo Code Converter で作成した
     GeoPackage（GPKG）の使用を推奨します。
   </div>
-
-  <!-- ── 動作要件 ── -->
-  <span class="section-anchor" id="requirements"></span>
-  <h2>動作要件</h2>
-  <table>
-    <tr><th>項目</th><th>要件</th></tr>
-    <tr><td>QGIS バージョン</td><td>3.14 以上</td></tr>
-    <tr><td>動作確認環境</td><td>QGIS 3.40.10（Windows・Linux）</td></tr>
-    <tr><td>インターネット接続</td><td>必須（API・MVTタイルへのアクセス）</td></tr>
-    <tr><td>GeoPackageまたはShapefile</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ<br>または静岡県配布の森林計画図SHPファイル</td></tr>
-    <tr><td>対象地域</td><td>静岡県内のみ</td></tr>
-  </table>
-
-  <!-- ── インストール ── -->
-  <span class="section-anchor" id="install"></span>
-  <h2>インストール</h2>
-
-  <h3>QGIS公式リポジトリからのインストール手順（推奨）</h3>
-  <ol>
-    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
-    <li>「すべて」タブで <strong>Fcloud Shizuoka</strong> を検索する</li>
-    <li><strong>プラグインをインストール</strong> をクリックする</li>
-    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
-  </ol>
-
-  <h3>ZIP からのインストール手順</h3>
-  <ol>
-    <li>配布された <code>fcloud_shizuoka.zip</code> をダウンロードする</li>
-    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
-    <li>左側の「ZIP からインストール」タブを選択する</li>
-    <li>「…」ボタンで先ほどの ZIP ファイルを選択し、<strong>プラグインをインストール</strong> をクリックする</li>
-    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
-  </ol>
-
-  <div class="tip">
-    インストール直後はドックパネルが非表示です。ツールバーのアイコン、またはメニュー
-    <strong>ベクタ → 静岡県森林クラウド</strong> をクリックして表示します。
-  </div>
-
-  <h3>アップデート</h3>
-  <p>
-    QGIS公式リポジトリからインストールした場合は、
-    <strong>プラグインの管理とインストール → アップグレード可能</strong> に表示され次第、通常のプラグインと同様に更新できます。
-    ZIP からインストールした場合は、新しい ZIP を配布された際に同じ手順で上書きインストールしてください。
-    または <strong>プラグインの管理とインストール → インストール済み</strong> から
-    <code>Fcloud Shizuoka</code> を一度アンインストールしてから再インストールしてください。
-  </p>
 
   <!-- ── 画面構成 ── -->
   <span class="section-anchor" id="ui"></span>
@@ -499,8 +493,10 @@
           <div class="ui-tab" style="padding:5px 6px;">森の力</div>
           <div class="ui-tab" style="padding:5px 6px;">経営計画</div>
           <div class="ui-tab" style="padding:5px 6px;">林地開発</div>
+          <div class="ui-tab" style="padding:5px 6px;">森林資源情報</div>
           <div style="margin-left:auto; align-self:center; display:flex; gap:8px; font-size:10px; color:#333;">
             <span>☐ 選択時のズームを無効化</span>
+            <span>☐ 画面ロック</span>
             <span>☐ 別ウィンドウ</span>
           </div>
         </div>
@@ -530,8 +526,8 @@
     <tr><td><strong>左パネルのタブの右側</strong></td><td>「マニュアル」: このマニュアルを開くリンク</td></tr>
     <tr><td><strong>左パネル「選択中の小班」タブ</strong></td><td>地図上で選択したフィーチャーの森林簿属性を表示</td></tr>
     <tr><td><strong>左パネル「クラウド情報」タブ</strong></td><td>右パネルの表で選択した行の詳細情報を表示</td></tr>
-    <tr><td><strong>右パネル</strong></td><td>森林簿・保安林台帳・森の力・経営計画・林地開発の表示・検索（整備事業タブは、森林クラウド側が未実装のため使えません）</td></tr>
-    <tr><td><strong>右パネルのタブの右側</strong></td><td>「選択時のズームを無効化」: オンにすると、表の行を選択しても地図の縮尺を変えず、中心だけを選択位置に移します（既定はオフ。設定は保存されます）。<br>「別ウィンドウ」: パネルを QGIS 本体から独立した別ウィンドウで表示します。</td></tr>
+    <tr><td><strong>右パネル</strong></td><td>森林簿・保安林台帳・森の力・経営計画・林地開発の表示・検索、森林資源情報（オープンデータ）の取得・表示（整備事業タブは、森林クラウド側が未実装のため使えません）</td></tr>
+    <tr><td><strong>右パネルのタブの右側</strong></td><td>「選択時のズームを無効化」: オンにすると、表の行を選択しても地図の縮尺を変えず、中心だけを選択位置に移します（既定はオフ。設定は保存されます）。<br>「画面ロック」: オンにすると、表の行を選択しても地図を動かしません（パン・ズームをしません。ハイライトは表示されます）。全タブに共通で、「選択時のズームを無効化」とは片方だけをオンにできます（既定はオフ。設定は保存されます）。<br>「別ウィンドウ」: パネルを QGIS 本体から独立した別ウィンドウで表示します。</td></tr>
     <tr><td><strong>右パネル下部のバー</strong></td><td>レイヤー追加ボタン（林道、静岡県 微地形表現図）、データについて、キャッシュ操作（ローカル保存・更新）</td></tr>
   </table>
 
@@ -565,7 +561,7 @@
 
   <!-- ── 森林簿 ── -->
   <span class="section-anchor" id="shinrinbo"></span>
-  <h2>森林簿</h2>
+  <h2 class="print-page-break">森林簿</h2>
   <p>
     条件を指定して検索するタブではなく、地図上（接続中の GPKG/SHP レイヤー）で選択したフィーチャーの
     森林簿属性をそのまま一覧表示するタブです。複数フィーチャーを選択した場合は、選択した数だけ行が表示されます。
@@ -614,7 +610,7 @@
 
   <!-- ── 保安林台帳 ── -->
   <span class="section-anchor" id="hoanrin"></span>
-  <h2>保安林台帳</h2>
+  <h2 class="print-page-break">保安林台帳</h2>
   <p>
     静岡県森林クラウドの保安林台帳データを市町村・大字・地番で絞り込んで表示します。
     接続した GeoPackage の地番データと照合し、一致状況を色分けで示します。
@@ -642,7 +638,7 @@
     ハイライトの色は地番の一致状況を示します（<a href="#highlight">凡例</a>参照）。
   </p>
 
-  <h3 class="print-page-break">オプション機能</h3>
+  <h3>オプション機能</h3>
   <table>
     <tr><th>ボタン</th><th>説明</th></tr>
     <tr><td><strong>近傍データ ON/OFF</strong></td><td>地番の一桁・二桁ズレの近傍フィーチャーを黄・赤・橙でハイライト表示します。デフォルトはOFFです。</td></tr>
@@ -651,9 +647,57 @@
 
   <hr>
 
+  <!-- ── ハイライト凡例 ── -->
+  <span class="section-anchor" id="highlight"></span>
+  <h2>ハイライト色の凡例</h2>
+  <p>
+    保安林台帳の行選択時、GPKG の地番データとの照合結果に応じて次の色でハイライト表示します。
+  </p>
+
+  <table class="legend-table">
+    <tr>
+      <th>色</th>
+      <th>意味</th>
+      <th>条件</th>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-blue"></span>青</td>
+      <td><strong>完全一致</strong></td>
+      <td>地番親番・枝番ともに GPKG と一致</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-yellow"></span>黄</td>
+      <td><strong>近似一致</strong></td>
+      <td>地番親番は一致するが枝番が異なる（または GPKG に枝番なし）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-red"></span>赤</td>
+      <td><strong>近傍一致（一桁ズレ）</strong></td>
+      <td>親番の末尾1桁が異なるフィーチャー（近傍データ ON 時のみ表示）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-orange"></span>橙</td>
+      <td><strong>近傍一致（二桁ズレ）</strong></td>
+      <td>親番の末尾2桁が異なるフィーチャー（青・黄・赤が存在しない場合のみ表示）</td>
+    </tr>
+    <tr>
+      <td><span class="swatch sw-sel"></span>赤枠</td>
+      <td><strong>選択ハイライト</strong></td>
+      <td>森の力・経営計画・林地開発でレイヤー上の対象フィーチャーを示す</td>
+    </tr>
+  </table>
+
+  <div class="note">
+    赤・橙ハイライトは「近傍データ」ボタンが ON のときのみ表示されます。
+    デフォルトは OFF です。近傍一致は参考情報であり、実際の地番との同一性を保証するものではありません。
+  </div>
+
+
+  <hr>
+
   <!-- ── 森の力 ── -->
   <span class="section-anchor" id="mori"></span>
-  <h2>森の力再生事業</h2>
+  <h2 class="print-page-break">森の力再生事業</h2>
   <p>
     森の力再生事業の実施記録を農林事務所・年度・事業区分・整備者で検索します。
   </p>
@@ -740,63 +784,136 @@
 
   <hr>
 
-  <!-- ── ハイライト凡例 ── -->
-  <span class="section-anchor" id="highlight"></span>
-  <h2>ハイライト色の凡例</h2>
+  <!-- ── 森林資源情報 ── -->
+  <span class="section-anchor" id="shigen"></span>
+  <h2>森林資源情報</h2>
   <p>
-    保安林台帳の行選択時、GPKG の地番データとの照合結果に応じて次の色でハイライト表示します。
+    G空間情報センターで公開されている「静岡県森林資源解析データ」（航空レーザ計測をもとにした解析結果）を取得し、地図に表示します。
+    森林クラウドには無いオープンデータです。データの出典と扱いは、下部の「データについて」で確認できます。
   </p>
 
-  <table class="legend-table">
-    <tr>
-      <th>色</th>
-      <th>意味</th>
-      <th>条件</th>
-    </tr>
-    <tr>
-      <td><span class="swatch sw-blue"></span>青</td>
-      <td><strong>完全一致</strong></td>
-      <td>地番親番・枝番ともに GPKG と一致</td>
-    </tr>
-    <tr>
-      <td><span class="swatch sw-yellow"></span>黄</td>
-      <td><strong>近似一致</strong></td>
-      <td>地番親番は一致するが枝番が異なる（または GPKG に枝番なし）</td>
-    </tr>
-    <tr>
-      <td><span class="swatch sw-red"></span>赤</td>
-      <td><strong>近傍一致（一桁ズレ）</strong></td>
-      <td>親番の末尾1桁が異なるフィーチャー（近傍データ ON 時のみ表示）</td>
-    </tr>
-    <tr>
-      <td><span class="swatch sw-orange"></span>橙</td>
-      <td><strong>近傍一致（二桁ズレ）</strong></td>
-      <td>親番の末尾2桁が異なるフィーチャー（青・黄・赤が存在しない場合のみ表示）</td>
-    </tr>
-    <tr>
-      <td><span class="swatch sw-sel"></span>赤枠</td>
-      <td><strong>選択ハイライト</strong></td>
-      <td>森の力・経営計画・林地開発でレイヤー上の対象フィーチャーを示す</td>
-    </tr>
+  <h3>表示までの手順</h3>
+  <div class="flow">
+    <div class="flow-step">①「一覧を更新」（初回のみ）</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">② 計画区・種類・番号を選ぶ</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">③「取得し表示」</div>
+  </div>
+  <table>
+    <tr><th>項目</th><th>内容</th></tr>
+    <tr><td><strong>計画区</strong></td><td>伊豆・富士・静岡・天竜。接続している計画図レイヤーの計画区が初期値になります</td></tr>
+    <tr><td><strong>種類</strong></td><td>メッシュ／樹種ポリゴン／単木ポイント／林相識別図（下表）</td></tr>
+    <tr><td><strong>番号</strong></td><td>「計測年度－番号（解析範囲にかかる市町）」の形。番号が同じものは同じ解析範囲です</td></tr>
+    <tr><td><strong>一覧を更新</strong></td><td>G空間情報センターからデータの一覧を取り直します。一覧は保存されるので、次回からは回線がなくても選べます</td></tr>
+    <tr><td><strong>取得し表示</strong></td><td>選んだデータを取得して表示します。取得済みなら、そのまま表示します</td></tr>
   </table>
 
-  <div class="note">
-    赤・橙ハイライトは「近傍データ」ボタンが ON のときのみ表示されます。
-    デフォルトは OFF です。近傍一致は参考情報であり、実際の地番との同一性を保証するものではありません。
+  <table>
+    <tr><th>種類</th><th>内容</th></tr>
+    <tr><td><strong>メッシュ</strong></td><td>20m 四方ごとの樹種・立木本数・材積・樹高・傾斜など（森林資源量集計ポリゴン）。一部の解析範囲では、20m 四方ではなく小班ごとの集計（第1〜第3樹種ごとの面積・本数・材積など）が入っています</td></tr>
+    <tr><td><strong>樹種ポリゴン</strong></td><td>樹種の広がり。解析範囲によって形が違い、20m（または10m）のセルのままのもの、樹種ごとにまとめた大きな形のもの、小班ごとの集計（第1〜第3樹種）、樹冠ごとの細かい形のものがあります</td></tr>
+    <tr><td><strong>単木ポイント</strong></td><td>1本ごとの樹種・樹高・胸高直径・材積。スギ・ヒノキ類のみです</td></tr>
+    <tr><td><strong>林相識別図</strong></td><td>樹種・樹冠の特徴を色で表した画像（0.5m）。1件あたり数百MB〜2GB程度あり、取得前に容量を確認します。見た目を変えずに容量を減らした形で保存します</td></tr>
+  </table>
+
+  <h3>樹種の色分け</h3>
+  <p>
+    樹種の書き方は解析範囲によって違う（「ヒノキ」と「ヒノキ類」、「広葉樹」と「その他L」など）ため、取得するときに書き方をそろえた列
+    <code>樹種_統一</code> を作り、その列で色分けします。元の樹種の列はそのまま残ります。
+  </p>
+  <table>
+    <tr><th>色分けの区分</th><th>まとめるもの（例）</th></tr>
+    <tr><td>スギ</td><td>スギ</td></tr>
+    <tr><td>ヒノキ類</td><td>ヒノキ類、ヒノキ</td></tr>
+    <tr><td>マツ類</td><td>マツ類、マツ</td></tr>
+    <tr><td>その他Ｎ</td><td>その他N、その他の針葉樹</td></tr>
+    <tr><td>その他Ｌ</td><td>その他L、広葉樹、広葉樹林</td></tr>
+    <tr><td>タケ</td><td>タケ、竹林</td></tr>
+    <tr><td>伐採跡地・その他・森林外・新植地</td><td>そのまま</td></tr>
+  </table>
+  <p>
+    小班ごとの集計のデータは、第1樹種で色分けします。樹種の列が無いデータは色分けしません。
+    どちらの場合も、表示したときに下部の状態表示でお知らせします。
+  </p>
+
+  <h3>表と地図</h3>
+  <p>
+    計画図レイヤーで小班を選ぶと、表示中のデータのうち<strong>選んだ小班にかかる地物</strong>が表に出ます（森林簿タブと同じ操作です）。
+    表の行を選ぶ（クリック・十字キー）と、その地物を地図上で赤くハイライトしてその位置へ移し、左パネルの「資源情報」に属性を表示します
+    （「選択時のズームを無効化」がオンの場合は、縮尺を変えず中心だけを移します）。
+  </p>
+  <p>
+    樹種ごとにまとめた大きな形の樹種ポリゴンは、1件が広い範囲にまたがるため、小班での絞り込みと地図の移動は行わず、全件を表に出します。
+    小班ごとの集計や樹冠ごとの細かい形のデータは、メッシュと同じく選んだ小班で絞り込みます。
+  </p>
+  <p>
+    小班を選んでいないときは、表の場所に<strong>データ全体の統計</strong>を出します（メッシュ・単木ポイント）。
+    セル数（単木ポイントは本数）、データのある面積、材積のある森林の面積、材積合計、ha材積、立木本数・立木密度、平均樹高・平均直径、樹種ごとの数と、
+    計画図との重なり（範囲にかかる市町・林班の範囲・小班数）です。統計は初めて開いたときだけ時間がかかり、次からは保存した結果を出します。
+  </p>
+  <ul>
+    <li>ha材積・立木密度・平均樹高・平均直径は、<strong>材積のある森林</strong>（スギ・ヒノキ類など、材積が入っているセル）だけで求めます。
+      広葉樹などのセルは材積・本数が 0 のため、「データのある面積」には含めますが、haあたりの値と平均の計算には含めません</li>
+    <li>メッシュに小班ごとの集計が入っているデータでは、小班数で数えます。材積のある森林の面積は、第1〜第3樹種のうち材積のあるものの面積の合計です。平均樹高・平均直径は出しません</li>
+  </ul>
+  <div class="tip">
+    このタブを開いているあいだ、左パネルの「クラウド情報」タブは「資源情報」になり、選んだデータの内容（範囲にかかる市町、計測年度、林相識別図の有無と容量、取得状況など）を表示します。
   </div>
 
-  <h3>表示の優先ルール</h3>
-  <ul>
-    <li><strong>青が存在する場合</strong>：青のみ表示</li>
-    <li><strong>青がなく黄・赤が存在する場合</strong>：黄・赤を表示（橙は表示しない）</li>
-    <li><strong>黄・赤も存在しない場合</strong>：橙のみ表示（救済表示）</li>
-  </ul>
+  <h3>表示と保存</h3>
+  <p>
+    表示できるデータは1つだけで、別のデータを表示すると、前のデータと入れ替わります。
+  </p>
+  <div class="warn">
+    データはプロジェクトフォルダ内の <code>fcapital_data_shizuoka/shared/</code> に保存します。<strong>QGIS プロジェクトが保存されていない場合は取得できません。</strong>
+    データは大きく、プロジェクトフォルダが同期フォルダ（Dropbox など）にある場合は同期の対象になる点に注意してください。
+  </div>
+  <div class="note">
+    静岡県は、このデータの精度は計測時期等により異なる場合があり、作成時点の現況を示すもので現在の現況ではない、としています。
+    メッシュのスギ・ヒノキ類以外のセルでは、立木本数・樹高などの値は 0 です。
+    座標系の情報が付いていないデータ（一部の解析範囲の樹種ポリゴン）は、平面直角座標系 第VIII系（JGD2011）として読み込みます。
+  </div>
+
+  <details class="fold">
+    <summary>パソコンについて</summary>
+    <div class="fold-body">
+      <p>
+        森林に関する情報は、大きなデータを扱います。特に「森林資源情報」タブで扱う航空レーザ解析のデータは、
+        1つの解析範囲で数百MB〜数GBになります（例：賀茂地区の5範囲で、林相識別図を含め約9GB）。
+      </p>
+      <p>本プラグインでは、軽く動かすために次のことを行っています。</p>
+      <ul>
+        <li>取得したデータは、空間インデックス付きの GeoPackage として保存し、2回目からは回線を使わずに素早く読み込む</li>
+        <li>林相識別図は、見た目を変えずに容量を減らし、縮小表示用の画像（ピラミッド）を付けて保存する</li>
+        <li>表に出すのは、計画図で選んだ小班にかかる地物だけにする</li>
+        <li>地図に表示する森林資源情報は、常に1つだけにする</li>
+        <li>取得や変換は裏側で行い、その間も QGIS を操作できるようにする</li>
+      </ul>
+      <p>それでも、次のような場面では、パソコンの性能によって待ち時間が大きく変わります。</p>
+      <ul>
+        <li>データの取得（回線の速さ）と、取得後の変換（ディスクの速さ・CPU のコア数）</li>
+        <li>林相識別図や単木ポイント（数十万〜数百万点）を、広い範囲で表示するとき</li>
+        <li>大きなデータを、ほかのレイヤーと重ねて表示するとき</li>
+      </ul>
+      <p>
+        一般的な事務作業向けのパソコンより、次のような余裕があるほど快適になります。
+      </p>
+      <ul>
+        <li><strong>メモリ</strong>に余裕がある</li>
+        <li>データを保存するドライブが <strong>SSD</strong> である</li>
+        <li>保存先のドライブの<strong>空き容量</strong>に、取得するデータの数倍の余裕がある（取得の途中で一時ファイルを使います）</li>
+        <li><strong>CPU のコア数</strong>が多い（林相識別図の変換が速くなります）</li>
+      </ul>
+      <p>森林クラウドのタブ（森林簿・保安林台帳など）だけを使う場合は、これほどの性能は必要ありません。</p>
+    </div>
+  </details>
 
   <hr>
 
   <!-- ── kozu連携 ── -->
   <span class="section-anchor" id="kozu"></span>
-  <h2>公図連携（kozu_xml_integrator）</h2>
+  <h2 class="print-page-break">公図連携（kozu_xml_integrator）</h2>
   <p>
     <strong>kozu_xml_integrator</strong> プラグインがインストールされている場合、
     保安林台帳・森林簿タブの「公図連携 ON/OFF」ボタンを ON にすることで、
@@ -866,6 +983,7 @@
     <tr><td>森の力</td><td>SQLite（検索条件別）＋ GPKG</td><td>テーブルデータと実施箇所ポリゴンを別々にキャッシュ</td></tr>
     <tr><td>経営計画</td><td>SQLite（全件）＋ GPKG</td><td>読み込み時に自動保存。次回はキャッシュから高速読み込み</td></tr>
     <tr><td>林地開発</td><td>SQLite（検索条件別）</td><td>市町村・開発区分・開発目的の組み合わせでキャッシュ</td></tr>
+    <tr><td>森林資源情報</td><td>GPKG ＋ GeoTIFF</td><td><code>fcapital_data_shizuoka/shared/</code> に保存。取得済みのデータは回線がなくても表示できる。下部の「ローカル保存」「更新」は使わない</td></tr>
   </table>
 
   <hr>
@@ -874,23 +992,67 @@
   <span class="section-anchor" id="layers"></span>
   <h2>レイヤー追加機能</h2>
   <p>
-    ドック下部の「レイヤー追加」エリアから、補助的な MVT レイヤーをワンクリックで追加できます。
+    ドック下部の「レイヤー追加」エリアから、補助的なレイヤーをワンクリックで追加できます。
   </p>
 
   <table>
     <tr><th>ボタン</th><th>追加されるレイヤー</th></tr>
     <tr><td><strong>林道</strong></td><td>静岡県森林クラウドの林道 MVT レイヤー（<code>fcloud_林道</code>）</td></tr>
+    <tr><td><strong>静岡県 微地形表現図</strong></td><td>森林クラウドの背景タイル（CS立体図）。追加済みならボタンは無効。終了後も通常のレイヤーとして残ります</td></tr>
   </table>
 
   <p>
-    各タブのレイヤーボタン（実施箇所レイヤー・計画箇所レイヤー・林地開発レイヤー）から追加したレイヤーは、
-    タブを切り替えると自動的に非表示になり、タブに戻ると再表示されます。
+    各タブのレイヤーボタン（実施箇所・計画箇所・林地開発）で追加したレイヤーは、そのタブを開いているあいだだけ表示されます。
   </p>
 
+  <hr>
+
+  <!-- ── 動作要件 ── -->
+  <span class="section-anchor" id="requirements"></span>
+  <h2 class="print-page-break">動作要件</h2>
+  <table>
+    <tr><th>項目</th><th>要件</th></tr>
+    <tr><td>QGIS バージョン</td><td>4.0 以上（4.x 系）</td></tr>
+    <tr><td>動作確認環境</td><td>QGIS 4.2.2（Windows、Linux は Flatpak 版）</td></tr>
+    <tr><td>インターネット接続</td><td>必須（API・MVTタイルへのアクセス）</td></tr>
+    <tr><td>GeoPackageまたはShapefile</td><td>Shinrinbo Code Converter で生成した静岡県森林簿データ<br>または静岡県配布の森林計画図SHPファイル</td></tr>
+    <tr><td>対象地域</td><td>静岡県内のみ</td></tr>
+  </table>
+
+  <!-- ── インストール ── -->
+  <span class="section-anchor" id="install"></span>
+  <h2>インストール</h2>
+
+  <h3>QGIS公式リポジトリからのインストール手順（推奨）</h3>
+  <ol>
+    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
+    <li>「すべて」タブで <strong>Fcloud Shizuoka</strong> を検索する</li>
+    <li><strong>プラグインをインストール</strong> をクリックする</li>
+    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
+  </ol>
+
+  <h3>ZIP からのインストール手順</h3>
+  <ol>
+    <li>配布された <code>fcloud_shizuoka.zip</code> をダウンロードする</li>
+    <li>QGIS のメニューから <strong>プラグイン → プラグインの管理とインストール</strong> を開く</li>
+    <li>左側の「ZIP からインストール」タブを選択する</li>
+    <li>「…」ボタンで先ほどの ZIP ファイルを選択し、<strong>プラグインをインストール</strong> をクリックする</li>
+    <li>インストール後、ベクタツールバーに森林クラウドアイコンが追加される</li>
+  </ol>
+
   <div class="tip">
-    追加されたレイヤーは、接続中の GPKG レイヤーの直上に配置されます。
-    プロジェクト未接続の場合はレイヤーツリーの最上部に追加されます。
+    インストール直後はドックパネルが非表示です。ツールバーのアイコン、またはメニュー
+    <strong>ベクタ → 静岡県森林クラウド</strong> をクリックして表示します。
   </div>
+
+  <h3>アップデート</h3>
+  <p>
+    QGIS公式リポジトリからインストールした場合は、
+    <strong>プラグインの管理とインストール → アップグレード可能</strong> に表示され次第、通常のプラグインと同様に更新できます。
+    ZIP からインストールした場合は、新しい ZIP を配布された際に同じ手順で上書きインストールしてください。
+    または <strong>プラグインの管理とインストール → インストール済み</strong> から
+    <code>Fcloud Shizuoka</code> を一度アンインストールしてから再インストールしてください。
+  </p>
 
   <hr>
   <p style="color:var(--muted); font-size:12px; text-align:center; margin-top:30px;">
@@ -898,5 +1060,14 @@
   </p>
 
 </main>
+<script>
+  // 印刷時は折りたたみ（details）を開いて中身も印刷する
+  window.addEventListener('beforeprint', function () {
+    document.querySelectorAll('details.fold').forEach(function (d) { d.dataset.wasOpen = d.open ? '1' : ''; d.open = true; });
+  });
+  window.addEventListener('afterprint', function () {
+    document.querySelectorAll('details.fold').forEach(function (d) { d.open = d.dataset.wasOpen === '1'; });
+  });
+</script>
 </body>
 </html>

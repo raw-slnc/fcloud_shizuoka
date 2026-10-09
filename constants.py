@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """静岡県森林行政のドメイン知識。実装詳細から独立した定数・マスターデータ。"""
 import datetime
+import os
 
 _PRIMARY_FIELDS = [
     ('市町村名称',        '市町村'),
@@ -29,7 +30,7 @@ _PRIMARY_FIELDS = [
 # 2行目以降は項目名を空にして並べる。列名の「登記」は調査方法を示し、ユーザー独自調査の
 # 情報の場合もあるため、項目名には使わない。
 _OWNER_FIELDS = ('登記所有者_漢字', '登記所有者_住所')
-_OWNER_LABEL  = '所有者情報'
+_OWNER_LABEL = '所有者情報'
 # クラウド情報タブ（森林簿）で所有者情報を続けるときの見出し。タブ名「クラウド情報」に対して、
 # 接続中の計画図レイヤーの情報であることを示す
 _OWNER_SOURCE_TITLE = '計画図レイヤー情報'
@@ -232,9 +233,9 @@ _CITY_TO_NORIN = {
 }
 
 # 経営計画MVT全県取得用
-_SHIZUOKA_BBOX     = (137.40, 34.50, 139.20, 35.80)  # (minLon, minLat, maxLon, maxLat) EPSG:4326
-_KEIKAKU_MVT_ZOOM  = 13
-_MORI_MVT_ZOOM     = 13
+_SHIZUOKA_BBOX = (137.40, 34.50, 139.20, 35.80)  # (minLon, minLat, maxLon, maxLat) EPSG:4326
+_KEIKAKU_MVT_ZOOM = 13
+_MORI_MVT_ZOOM = 13
 
 _NORIN_OFFICES = [
     '賀茂農林事務所', '東部農林事務所', '富士農林事務所', '中部農林事務所',
@@ -374,3 +375,58 @@ _TOGGLE_BTN_QSS_LAYER = _TOGGLE_BTN_QSS_BASE + (
     'background-color:rgba(38,166,154,0.28);'
     'border-color:rgba(38,166,154,0.90);}'
 )
+
+# ── 森林資源情報タブ（G空間情報センター「静岡県森林資源解析データ」）──────────
+_FCDS_API_PACKAGE_SHOW = 'https://www.geospatial.jp/ckan/api/3/action/package_show?id='
+# （計画区, CKAN データセットID）
+_FCDS_DATASETS = [
+    ('伊豆', 'izu-keikaku'),
+    ('富士', 'fuji-keikaku'),
+    ('静岡', 'shizuoka-keikaku'),
+    ('天竜', 'tenryu-keikaku'),
+]
+# 計画図の KEY1 の先頭3桁（計画区の番号）→ データセットID
+_FCDS_KEIKU_CODE = {
+    '001': 'izu-keikaku', '002': 'fuji-keikaku',
+    '003': 'shizuoka-keikaku', '004': 'tenryu-keikaku',
+}
+# 取得データの保存先（プロジェクトのフォルダからの相対）。Forest Capital Data Shizuoka と共有する
+_FCDS_SHARED_SUBDIR = os.path.join('fcapital_data_shizuoka', 'shared')
+# （キー, 表示名, 初期チェック）
+_FCDS_TYPES = [
+    ('mesh',    'メッシュ',     True),
+    ('species', '樹種ポリゴン', True),
+    ('points',  '単木ポイント', False),
+    ('rinso',   '林相識別図',   False),
+]
+# ZIP ごとに揺れる樹種名を、下田市・南伊豆町・松崎町の表記（中樹種の区分）にそろえる（樹種_統一 列）。
+# 全 42 ZIP の値を数えて作った（2026-10-09）。樹種と中樹種を両方持つデータでは
+# ヒノキ→ヒノキ類・広葉樹→その他L・その他の針葉樹→その他N・マツ→マツ類 が例外なく対応していた
+_FCDS_SPECIES_NORM = {
+    'ヒノキ': 'ヒノキ類', 'マツ': 'マツ類',
+    'その他N': 'その他Ｎ', 'その他の針葉樹': 'その他Ｎ', 'その他針葉・': 'その他Ｎ',
+    'その他L': 'その他Ｌ', '広葉樹': 'その他Ｌ', '広葉樹林': 'その他Ｌ',
+    '竹林': 'タケ',
+}
+# 樹種の列の判定ルール（上から順に、必須の列がすべてあれば当てはまる）。
+# （形式, 必須の列, 樹種_統一 の元にする列）。元にする列は前のものが空なら次を使う。
+# 列の名前で判定し、樹種ID は使わない（ZIP によって番号の振り方が違うため）。
+# 新しい形式が出てきたら行を足す
+_FCDS_SPECIES_RULES = [
+    ('小班集計（第1樹種）',   ('KEY1', '解析樹種1'), ('解析樹種1',)),
+    ('小班集計（第1林相）',   ('第1_林相名',),       ('第1_林相名',)),
+    ('中樹種',               ('中樹種',),           ('中樹種', '樹種')),
+    ('解析樹種',             ('解析樹種',),         ('解析樹種', '樹種')),
+    ('樹種',                 ('樹種',),             ('樹種',)),
+    ('林相名',               ('林相名',),           ('林相名',)),
+]
+# 表示するレイヤーの選択の色（「選択された地物の色を上書き」：黄色・不透明度128/255）
+_FCDS_SELECTION_RGBA = (255, 255, 0, 128)
+# 樹種の配色（レイヤー「樹種分布」の配色に合わせたもの）
+_FCDS_SPECIES_COLORS = [
+    ('スギ', '#ff9e17'), ('ヒノキ類', '#fafaaf'), ('マツ類', '#ff2323'),
+    ('その他Ｎ', '#ff2323'), ('その他Ｌ', '#41d5ff'), ('タケ', '#67d1d7'),
+    ('伐採跡地', '#aaaaaa'), ('その他', '#aaaaaa'),
+    # スタイル（styles/*.qml）に無い区分。スタイルを当てたあとに足す
+    ('森林外', '#e6e6e6'), ('新植地', '#c8e6a0'),
+]
