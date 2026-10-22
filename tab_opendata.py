@@ -66,6 +66,28 @@ _STYLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'styles')
 _OD_ORPHANED_WORKERS = set()
 
 
+# データの形（メッシュかポリゴンか）を見分けるフォルダ。どちらに格子のデータが入っているかは解析範囲によって違う
+_SHAPE_FOLDERS = ('mesh', 'species')
+
+
+def _classify_areas(areas):
+    """先頭の地物の面積（㎡）から、データの形を決める。
+    ほとんど（9割以上）が 10m・20m 四方のセルの面積ならメッシュ、そうでなければポリゴン。"""
+    sizes = [round(a) for a in areas]
+    for cell, a in ((10, 100), (20, 400)):
+        if sizes and sum(1 for s in sizes if s == a) >= len(sizes) * 0.9:
+            return {'shape': 'grid', 'cell': cell}
+    return {'shape': 'polygon', 'cell': None}
+
+
+def _shape_label(info):
+    """データの形の表示名（メッシュ（20m×20m）／ポリゴン）。"""
+    if info and info.get('shape') == 'grid':
+        cell = info.get('cell')
+        return f'メッシュ（{cell}m×{cell}m）' if cell else 'メッシュ'
+    return 'ポリゴン'
+
+
 def _species_rule(names):
     """列の名前から樹種の列の形式を決める。（形式, 樹種_統一 の元にする列）。当てはまらなければ None。"""
     for label, required, sources in _FCDS_SPECIES_RULES:
@@ -100,32 +122,76 @@ class _ConvertWorker(QThread):
             # ZIP 内の日本語ファイル名は Shift_JIS（このスレッドだけに効かせる）
             gdal.SetThreadLocalConfigOption('CPL_ZIP_ENCODING', 'CP932')
             job = self.job
-            result = {'key': job['key'], 'layers': [], 'rasters': [], 'formats': {}}
+            result = {'key': job['key'], 'layers': [], 'rasters': [], 'formats': {}, 'type': job['type']}
             if job.get('zip_vec'):
-                result['layers'], result['formats'] = self._convert_vectors(gdal, job)
+                result['layers'], result['formats'] = self._convert_vectors(gdal, job, result)
             for zpath in job.get('zip_rinso', []):
                 result['rasters'] += self._extract_rinso(zpath, job['rinso_dir'])
             self.finished_ok.emit(result)
         except Exception as e:  # noqa: BLE001 - 変換失敗は理由を画面に出して続行させる
             self.failed.emit(str(e))
 
-    def _convert_vectors(self, gdal, job):
+    @staticmethod
+    def _find_shp(files, t):
+        """ZIP の中の Shapefile のうち、フォルダ t（_ZIP_LAYERS のキー）のもの。無ければ None。"""
+        folder, prefer, avoid, _out = _ZIP_LAYERS[t]
+        cand = [f for f in files if folder in f
+                and (avoid is None or avoid not in os.path.basename(f))]
+        cand.sort(key=lambda f: prefer not in os.path.basename(f))
+        return cand[0] if cand else None
+
+    def _open_shp(self, gdal, vz, shp):
+        # QGIS 内では Shapefile の文字コード自動判定が切られているため、DBF の文字コードを明示する
+        return gdal.OpenEx(vz + '/' + shp, gdal.OF_VECTOR,
+                           open_options=['ENCODING=' + self._shp_encoding(gdal, vz + '/' + shp)])
+
+    def _classify_folders(self, gdal, vz, files):
+        """ZIP の中の各フォルダのデータの形（メッシュかポリゴンか）。先頭の地物の面積だけを見る（変換しない）。"""
+        shapes = {}
+        for t in _SHAPE_FOLDERS:
+            shp = self._find_shp(files, t)
+            if shp is None:
+                continue
+            src = self._open_shp(gdal, vz, shp)
+            lyr = src.GetLayer(0)
+            areas = []
+            for f in lyr:
+                g = f.GetGeometryRef()
+                if g is not None:
+                    areas.append(g.GetArea())
+                if len(areas) >= 300:
+                    break
+            src = None
+            shapes[t] = _classify_areas(areas)
+        return shapes
+
+    def _convert_vectors(self, gdal, job, result):
         vz = '/vsizip/' + job['zip_vec']
         files = [f for f in gdal.ReadDirRecursive(vz) or [] if f.lower().endswith('.shp')]
         done = []
         formats = {}  # 出力レイヤー名 → 樹種の列の形式（判定ルールの名前）
-        for t in job['types']:
+        types = list(job['types'])
+        if job.get('want'):
+            # 「メッシュ」「ポリゴン」を選んだとき：ZIP の中のフォルダの形を見て、選んだ形のものを変換する
+            self.progress.emit('データの形を確認中')
+            shapes = self._classify_folders(gdal, vz, files)
+            result['shapes'] = shapes
+            folder = next((t for t in _SHAPE_FOLDERS
+                           if shapes.get(t, {}).get('shape') == job['want']), None)
+            if folder is None:
+                result['missing'] = job['want']
+                types = []
+            else:
+                types = [folder]
+                result['type'] = folder
+        for t in types:
             if t not in _ZIP_LAYERS:
                 continue
-            folder, prefer, avoid, out_name = _ZIP_LAYERS[t]
-            cand = [f for f in files if folder in f
-                    and (avoid is None or avoid not in os.path.basename(f))]
-            cand.sort(key=lambda f: prefer not in os.path.basename(f))
-            if not cand:
+            out_name = _ZIP_LAYERS[t][3]
+            shp = self._find_shp(files, t)
+            if shp is None:
                 continue
-            # QGIS 内では Shapefile の文字コード自動判定が切られているため、DBF の文字コードを明示する
-            src = gdal.OpenEx(vz + '/' + cand[0], gdal.OF_VECTOR,
-                              open_options=['ENCODING=' + self._shp_encoding(gdal, vz + '/' + cand[0])])
+            src = self._open_shp(gdal, vz, shp)
             lyr = src.GetLayer(0)
             defn = lyr.GetLayerDefn()
             names = [defn.GetFieldDefn(i).GetName() for i in range(defn.GetFieldCount())]
@@ -275,7 +341,8 @@ class _StatsWorker(QThread):
             {'樹高': ('樹高',), '胸高直径': ('胸高直径', '胸高直')}),
     }
     # 統計の求め方の版。変えたら、取得済みの記録に残した統計を求め直す
-    _VERSION = 3
+    # 4：統計を出すかどうか・集計の決まりを、レイヤー名でなくデータの形（メッシュ）で決める
+    _VERSION = 4
 
     @staticmethod
     def _forest_area_expr(sums, cols):
@@ -305,9 +372,55 @@ class _StatsWorker(QThread):
                 return f'"{a}"'
         return None
 
-    def __init__(self, key, gpkg, lname):
+    @classmethod
+    def _aggregate(cls, con, lname, where='', spec=None, cell_ha=None):
+        """件数・合計・平均・樹種ごとの件数を SQL で求める。where は絞り込みの条件（' WHERE …'）。
+        spec：集計の決まり（_SPEC のキー。データの形がメッシュなら 'メッシュ'）。None ならレイヤー名。
+        cell_ha：メッシュの1セルの面積（ha）。面積の列が無いメッシュでは、セルの数 × この面積を面積にする。"""
+        spec = spec or lname
+        cols = {r[1] for r in con.execute(f'PRAGMA table_info("{lname}")')}
+        sum_spec, avg_spec = cls._SPEC.get(spec, ({}, {}))
+        sums = [(k, e) for k, alts in sum_spec.items()
+                if (e := cls._source_expr(alts, cols))]
+        avgs = [(k, e) for k, alts in avg_spec.items()
+                if (e := cls._source_expr(alts, cols))]
+        if spec == 'メッシュ' and cell_ha and '面積_ha' not in dict(sums):
+            sums.append(('面積_ha', repr(float(cell_ha))))
+        if spec == 'メッシュ':
+            # haあたり・平均の分母は対象の森林（材積の入っているセル・樹種）にする。
+            # 広葉樹などのセルは材積・本数・樹高が 0 で、土地の面積で割ると値が薄まる
+            forest = cls._forest_area_expr(dict(sums), cols)
+            if forest:
+                sums.append(('森林面積', forest))
+            vol = dict(sums).get('合計材積')
+            if vol:
+                avgs = [(k, f'CASE WHEN ({vol}) > 0 THEN {e} END') for k, e in avgs]
+        sel = (['COUNT(*)'] + [f'SUM({e})' for _, e in sums]
+               + [f'AVG({e})' for _, e in avgs])
+        # SQL に入るのはプラグインで決めたレイヤー名・項目・条件と、データの列名だけ（利用者の入力は入らない）
+        row = con.execute(f'SELECT {", ".join(sel)} FROM "{lname}"{where}').fetchone()  # nosec B608
+        out = {'v': cls._VERSION, 'count': row[0], 'sum': {}, 'avg': {}, 'species': []}
+        # 小班ごとの集計（メッシュの代わりに入っている ZIP がある）は、数える単位が小班
+        if 'KEY1' in cols and ('解析樹種1' in cols or '第1_林相名' in cols):
+            out['unit'] = '小班'
+        for i, (k, _) in enumerate(sums):
+            out['sum'][k] = row[1 + i]
+        for i, (k, _) in enumerate(avgs):
+            out['avg'][k] = row[1 + len(sums) + i]
+        sp = next((c for c in ('樹種_統一', '解析樹種', '樹種') if c in cols), None)
+        if sp:
+            out['species'] = [
+                [name if name not in (None, '') else '不明', n]
+                for name, n in con.execute(
+                    f'SELECT "{sp}", COUNT(*) FROM "{lname}"{where} GROUP BY 1 ORDER BY 2 DESC')]  # nosec B608
+        return out
+
+    def __init__(self, key, gpkg, lname, spec=None, cell_ha=None, fp_src=None):
         super().__init__()
         self.key, self.gpkg, self.lname = key, gpkg, lname
+        self.spec, self.cell_ha = spec, cell_ha
+        # 計画図との重なりに使う範囲を作るレイヤー（メッシュはそれ自身、単木ポイントは同じ GPKG の面のデータ）
+        self.fp_src = fp_src
 
     def run(self):
         import sqlite3
@@ -316,45 +429,9 @@ class _StatsWorker(QThread):
             uri = Path(self.gpkg).resolve().as_uri() + '?mode=ro'  # 読むだけ（書き込まない）
             con = sqlite3.connect(uri, uri=True)
             try:
-                cols = {r[1] for r in con.execute(f'PRAGMA table_info("{self.lname}")')}
-                sum_spec, avg_spec = self._SPEC.get(self.lname, ({}, {}))
-                sums = [(k, e) for k, alts in sum_spec.items()
-                        if (e := self._source_expr(alts, cols))]
-                avgs = [(k, e) for k, alts in avg_spec.items()
-                        if (e := self._source_expr(alts, cols))]
-                if self.lname == 'メッシュ':
-                    # haあたり・平均の分母は対象の森林（材積の入っているセル・樹種）にする。
-                    # 広葉樹などのセルは材積・本数・樹高が 0 で、土地の面積で割ると値が薄まる
-                    forest = self._forest_area_expr(dict(sums), cols)
-                    if forest:
-                        sums.append(('森林面積', forest))
-                    vol = dict(sums).get('合計材積')
-                    if vol:
-                        avgs = [(k, f'CASE WHEN ({vol}) > 0 THEN {e} END') for k, e in avgs]
-                sel = (['COUNT(*)'] + [f'SUM({e})' for _, e in sums]
-                       + [f'AVG({e})' for _, e in avgs])
-                # SQL に入るのはプラグインで決めたレイヤー名・項目と、データの列名だけ（利用者の入力は入らない）
-                row = con.execute(f'SELECT {", ".join(sel)} FROM "{self.lname}"').fetchone()  # nosec B608
-                out = {'v': self._VERSION, 'count': row[0], 'sum': {}, 'avg': {}, 'species': []}
-                # 小班ごとの集計（メッシュの代わりに入っている ZIP がある）は、数える単位が小班
-                if 'KEY1' in cols and ('解析樹種1' in cols or '第1_林相名' in cols):
-                    out['unit'] = '小班'
-                for i, (k, _) in enumerate(sums):
-                    out['sum'][k] = row[1 + i]
-                for i, (k, _) in enumerate(avgs):
-                    out['avg'][k] = row[1 + len(sums) + i]
-                sp = next((c for c in ('樹種_統一', '解析樹種', '樹種') if c in cols), None)
-                if sp:
-                    out['species'] = [
-                        [name if name not in (None, '') else '不明', n]
-                        for name, n in con.execute(
-                            f'SELECT "{sp}", COUNT(*) FROM "{self.lname}" GROUP BY 1 ORDER BY 2 DESC')]  # nosec B608
-                # 計画図との重なりに使う範囲：メッシュはそれ自身、単木ポイントは同じ GPKG のメッシュか
-                # 樹種ポリゴン（点からは範囲の形を作りにくいので、面のデータで代える）
+                out = self._aggregate(con, self.lname, spec=self.spec, cell_ha=self.cell_ha)
                 tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                fp_src = next((n for n in ('メッシュ', '樹種ポリゴン') if n in tables), None)
-                if self.lname not in ('メッシュ', '単木ポイント'):
-                    fp_src = None
+                fp_src = self.fp_src if self.fp_src in tables else None
             finally:
                 con.close()
             if fp_src:
@@ -397,6 +474,145 @@ class _StatsWorker(QThread):
         return wkt
 
 
+class _PlanStatsWorker(QThread):
+    """計画図で選んだ小班の範囲にあるメッシュ（単木ポイント）の統計を求める。
+    小班をセルの大きさの画像に焼き付け、セル（点）の中心がその画素に入るかで選んでから SQL で集計する。
+    形状どうしの判定をしないので、数万件の小班・数十万件のセルでも画面を止めずに求められる。"""
+    finished_ok = pyqtSignal(int, dict)  # (世代, 統計)
+    failed = pyqtSignal(int, str)
+    progress = pyqtSignal(int, int, str)  # (世代, 進み具合 0〜100, いまの段階)
+
+    # 焼き付ける画像の画素数の上限。超えるときは画素を粗くする（境界の振り分けがおおよそになる）
+    _MAX_PIXELS = 25_000_000
+
+    def __init__(self, gen, gpkg, lname, wkbs, extent, fp_wkb=None, spec=None, cell_ha=None):
+        super().__init__()
+        self.gen, self.gpkg, self.lname = gen, gpkg, lname
+        # 集計の決まり（_StatsWorker._SPEC のキー）。None なら統計を求めず、選んだ地物を返す（ポリゴン）
+        self.spec, self.cell_ha = spec, cell_ha
+        self.wkbs = wkbs        # 小班の形（データの座標系の WKB）
+        self.extent = extent    # 小班の外接範囲 (xmin, ymin, xmax, ymax)
+        self.fp_wkb = fp_wkb    # データのある範囲の形（無ければ None。面積を範囲の中に限るのに使う）
+        self.cancelled = False  # 新しい選択で要らなくなったら立てる（区切りごとに見て止める）
+
+    def run(self):
+        import math
+        import sqlite3
+        try:
+            from pathlib import Path
+            from osgeo import gdal, ogr
+            uri = Path(self.gpkg).resolve().as_uri() + '?mode=ro'  # 読むだけ（書き込まない）
+            con = sqlite3.connect(uri, uri=True)
+            try:
+                geom_col = con.execute(
+                    'SELECT column_name FROM gpkg_geometry_columns WHERE table_name = ?',
+                    (self.lname,)).fetchone()[0]
+                xmin, ymin, xmax, ymax = self.extent
+                # 進み具合の目安：範囲の読み込み 0〜20、小班の焼き付け 20〜60、振り分け 60〜85、集計 85〜100
+                self.progress.emit(self.gen, 0, 'データの範囲を読み込み中')
+                # 地物の範囲は空間索引（R木）から読む。形状そのものは読まない
+                # SQL に入るのはデータの表・列の名前だけ（利用者の入力は入らない）
+                rows = con.execute(
+                    f'SELECT id, minx, maxx, miny, maxy FROM "rtree_{self.lname}_{geom_col}" '  # nosec B608
+                    'WHERE maxx >= ? AND minx <= ? AND maxy >= ? AND miny <= ?',
+                    (xmin, xmax, ymin, ymax)).fetchall()
+                if self.cancelled:
+                    return
+                # メッシュ（10m・20m の正方形）は、画素をセルに合わせる（画素の中心＝セルの中心）。
+                # それ以外（点・小班ごとの集計）は、範囲から決めた細かさの画素で中心の位置を見る
+                widths = sorted(round(r[2] - r[1], 1) for r in rows[:200])
+                cell = widths[len(widths) // 2] if widths else 0
+                grid = cell in (10.0, 20.0)
+                area = max(xmax - xmin, 1.0) * max(ymax - ymin, 1.0)
+                res = max(cell if grid else 1.0, math.sqrt(area / self._MAX_PIXELS))
+                approx = not grid or res > cell
+                if grid and not approx and rows:
+                    # セルの1つの角を基準に、範囲を覆うように格子の原点を決める
+                    x0, y0 = rows[0][1], rows[0][4]
+                    gx = x0 - math.ceil((x0 - xmin) / res) * res
+                    gy = y0 + math.ceil((ymax - y0) / res) * res
+                else:
+                    gx, gy = xmin, ymax
+                w = max(1, int(math.ceil((xmax - gx) / res)))
+                h = max(1, int(math.ceil((gy - ymin) / res)))
+                self.progress.emit(self.gen, 20, '小班を焼き付け中')
+
+                mem = gdal.GetDriverByName('MEM').Create('', w, h, 1, gdal.GDT_Byte)
+                mem.SetGeoTransform((gx, res, 0, gy, 0, -res))
+                # メモリ上のベクタは、GDAL 3.11 より前は Memory、以後は MEM という名前
+                drv = ogr.GetDriverByName('Memory') or ogr.GetDriverByName('MEM')
+                vds = drv.CreateDataSource('plan')
+                vl = vds.CreateLayer('plan', geom_type=ogr.wkbMultiPolygon)
+                defn = vl.GetLayerDefn()
+                for wkb in self.wkbs:
+                    f = ogr.Feature(defn)
+                    f.SetGeometry(ogr.CreateGeometryFromWkb(wkb))
+                    vl.CreateFeature(f)
+                if self.cancelled:
+                    return
+                last = [-1]
+
+                def on_rasterize(complete, _message, _data):
+                    pct = 20 + int(complete * 40)
+                    if pct != last[0]:
+                        last[0] = pct
+                        self.progress.emit(self.gen, pct, '小班を焼き付け中')
+                    return 0 if self.cancelled else 1  # 0 を返すと GDAL が止める
+
+                # 既定（ALL_TOUCHED なし）では、中心が小班の中にある画素だけが焼き付けられる。
+                # 小班は 2、データのある範囲は 1 を足して焼き付ける（両方＝3、小班だけ＝2、範囲だけ＝1）
+                gdal.RasterizeLayer(mem, [1], vl, burn_values=[2], callback=on_rasterize)
+                if self.cancelled:
+                    return
+                if self.fp_wkb:
+                    fl = vds.CreateLayer('fp', geom_type=ogr.wkbMultiPolygon)
+                    f = ogr.Feature(fl.GetLayerDefn())
+                    f.SetGeometry(ogr.CreateGeometryFromWkb(self.fp_wkb))
+                    fl.CreateFeature(f)
+                    gdal.RasterizeLayer(mem, [1], fl, burn_values=[1], options=['MERGE_ALG=ADD'])
+                mask = mem.GetRasterBand(1).ReadRaster()
+                vds = mem = None
+                # 選んだ範囲のうちデータにかかる部分の面積（重なった小班も場所として1回だけ数える）
+                inside = mask.count(3) if self.fp_wkb else mask.count(2)
+                area_ha = inside * res * res / 10000
+
+                con.execute('CREATE TEMP TABLE _fcds_sel (fid INTEGER PRIMARY KEY)')
+                keep = []
+                n = len(rows)
+                step = max(1, n // 25)
+                for i, (fid, x1, x2, y1, y2) in enumerate(rows):
+                    if i % step == 0:
+                        if self.cancelled:
+                            return
+                        self.progress.emit(self.gen, 60 + int(25 * i / n), '小班の中にあるものを振り分け中')
+                    col = int(((x1 + x2) / 2 - gx) // res)
+                    row = int((gy - (y1 + y2) / 2) // res)
+                    if 0 <= col < w and 0 <= row < h and mask[row * w + col] >= 2:
+                        keep.append((fid,))
+                self.progress.emit(self.gen, 85, '集計中')
+                if self.spec is None:
+                    # 統計を求めないデータ（ポリゴン）は、選んだ地物を表に出す
+                    out = {'fids': [k[0] for k in keep]}
+                else:
+                    con.executemany('INSERT INTO _fcds_sel VALUES (?)', keep)
+                    if self.cancelled:
+                        return
+                    # GPKG の主キー（整数）は SQLite の rowid と同じなので、列名を調べて埋め込まず rowid で絞る
+                    out = _StatsWorker._aggregate(
+                        con, self.lname, ' WHERE rowid IN (SELECT fid FROM temp._fcds_sel)',
+                        spec=self.spec, cell_ha=self.cell_ha)
+                out['approx'] = approx
+                out['res'] = res
+                out['area_ha'] = area_ha
+            finally:
+                con.close()
+            if not self.cancelled:
+                self.finished_ok.emit(self.gen, out)
+        except Exception as e:  # noqa: BLE001 - 集計できなくても表示は続けられるので理由だけ伝える
+            if not self.cancelled:
+                self.failed.emit(self.gen, str(e))
+
+
 class OpendataMixin:
 
     # ------------------------------------------------------------------
@@ -429,10 +645,10 @@ class OpendataMixin:
         self.combo_od_keiku.setToolTip('計画図レイヤーの計画区を初期値にする')
         row.addWidget(self.combo_od_keiku)
         row.addWidget(QLabel('種類:'))
-        self.combo_od_type = QComboBox()
-        for key, label, _default in _FCDS_TYPES:
-            self.combo_od_type.addItem(label, key)
-        self.combo_od_type.setToolTip('林相識別図は 0.5m の画像で、1件あたり数百MB〜2GB程度あります')
+        self.combo_od_type = QComboBox()  # 選択肢は番号（解析範囲）ごとに作る（_od_fill_types）
+        self.combo_od_type.setToolTip(
+            'メッシュは格子（10m・20m 四方）のデータ、ポリゴンはそれ以外の形のデータ。\n'
+            '林相識別図は 0.5m の画像で、1件あたり数百MB〜2GB程度あります')
         row.addWidget(self.combo_od_type)
         row.addWidget(QLabel('番号:'))
         self.combo_od_no = QComboBox()
@@ -453,7 +669,8 @@ class OpendataMixin:
         self.tbl_od.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl_od.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._od_table_fid = None      # 表で選んだ地物（QGIS の選択状態とは別に持つ）
-        self.tbl_od.setToolTip('計画図レイヤーで選んだ小班にかかる、表示中のレイヤーの地物')
+        self.tbl_od.setToolTip('地図で選んだ、表示中のレイヤーの地物'
+                               '（統計を求めないデータでは、計画図で選んだ小班の中にある地物）')
         # 表の場所は、ベクタのデータなら属性の表、林相識別図（画像）ならその画像の情報を出す
         self.txt_od_rinso = QTextBrowser()
         self.txt_od_rinso.setOpenLinks(False)
@@ -466,6 +683,20 @@ class OpendataMixin:
         self.lbl_od_status = QLabel('「一覧を更新」を押してください')
         self.lbl_od_status.setStyleSheet('font-size: 10px;')  # 通常の文字色（ダークテーマでも読める）
         bottom.addWidget(self.lbl_od_status, 1)
+        # 選んだ小班の範囲の統計を求めている間だけ出す（終わったら隠す）
+        from qgis.PyQt.QtWidgets import QProgressBar
+        self.bar_od_progress = QProgressBar()
+        self.bar_od_progress.setRange(0, 100)
+        self.bar_od_progress.setMaximumWidth(220)
+        self.bar_od_progress.setMaximumHeight(14)
+        self.bar_od_progress.setTextVisible(True)
+        self.bar_od_progress.setVisible(False)
+        bottom.addWidget(self.bar_od_progress)
+        # すぐ終わる集計で一瞬だけ出てちらつかないよう、少し待っても終わらないときに出す
+        self._od_progress_timer = QTimer(w)
+        self._od_progress_timer.setSingleShot(True)
+        self._od_progress_timer.setInterval(300)
+        self._od_progress_timer.timeout.connect(lambda: self.bar_od_progress.setVisible(True))
         # 拡大したときにメッシュ・樹種ポリゴンの外周線が小班の線と紛らわしいので、消せるようにする。
         # どの縮尺から紛らわしいかは使い方によるので、利用者が決めて QGIS の設定に覚えさせる
         st = QSettings()
@@ -492,7 +723,7 @@ class OpendataMixin:
         self.combo_od_keiku.activated.connect(lambda _: self._od_fill_no(focus_left=True))
         self.combo_od_keiku.currentIndexChanged.connect(lambda _: self._od_fill_no())
         self.combo_od_no.activated.connect(lambda _: self._od_render_left(focus_left=True))
-        self.combo_od_no.currentIndexChanged.connect(lambda _: self._od_render_left())
+        self.combo_od_no.currentIndexChanged.connect(lambda _: (self._od_fill_types(), self._od_render_left()))
         self.combo_od_type.activated.connect(lambda _: self._od_render_left(focus_left=True))
         self.chk_od_outline.toggled.connect(lambda _: self._od_on_outline_setting())
         self.spin_od_outline.editingFinished.connect(self._od_on_outline_setting)
@@ -615,11 +846,11 @@ class OpendataMixin:
             ('取得状況', f"取得済み {got['fetched_at']}" if got else '未取得'),
         ]
         if got:
-            kinds = list(got.get('layers', [])) + (['林相識別図'] if got.get('rasters') else [])
+            kinds = ([self._od_lname_label(e['key'], n) for n in got.get('layers', [])]
+                     + (['林相識別図'] if got.get('rasters') else []))
             rows.append(('取得済みの種類', '、'.join(kinds) or '—'))
         if self._od_shown and self._od_shown[0] == e['key']:
-            label = self.combo_od_type.itemText(self.combo_od_type.findData(self._od_shown[1]))
-            rows.append(('表示中', label))
+            rows.append(('表示中', self._od_shown_label()))
         body = ['<table style="border-collapse:collapse;width:100%;">',
                 self._info_title_row('森林資源情報（オープンデータ）')]
         for k, val in rows:
@@ -810,7 +1041,49 @@ class OpendataMixin:
         es = [e for e in self._od_catalog if e['dataset'] == ds]
         es.sort(key=lambda e: (e['city'], int(e['yr'][1:]), int(e['no'])))
         self._od_refill(self.combo_od_no, [(f"{e['yr']}-{e['no']}（{e['city']}）", e['key']) for e in es])
+        self._od_fill_types()
         self._od_render_left(focus_left=focus_left)
+
+    def _od_type_items(self, key):
+        """「種類」の欄の選択肢 [(表示, data)]。data は次のどれか。
+        'grid@mesh' のような「データの形@フォルダ」：取得済みなどで、どのフォルダがその形かわかっているもの。
+        'grid'・'polygon'：まだわからないもの（ZIP を取得したときに形を見てフォルダを決める）。
+        'points'・'rinso'：単木ポイント・林相識別図。"""
+        rec = self._od_load_index().get(key) if key else None
+        shapes = {}
+        complete = False  # ZIP の中のフォルダの形をすべて見たか
+        if rec:
+            complete = bool(rec.get('shapes_complete'))
+            for f in _SHAPE_FOLDERS:
+                info = (rec.get('shapes') or {}).get(f) or self._od_layer_shape(key, f)
+                if info:
+                    shapes[f] = info
+        items = []
+        for kind, label in _FCDS_TYPES:
+            if kind not in ('grid', 'polygon'):
+                items.append((label, kind))
+                continue
+            known = [f for f in _SHAPE_FOLDERS if shapes.get(f, {}).get('shape') == kind]
+            items += [(label, f'{kind}@{f}') for f in known]
+            if not known and not complete:
+                items.append((label, kind))
+        return items
+
+    def _od_fill_types(self):
+        """「種類」の欄を、選んでいる番号（解析範囲）のデータに合わせて作り直す。直前に選んでいた種類は保つ。"""
+        prev = self.combo_od_type.currentData() or ''
+        items = self._od_type_items(self.combo_od_no.currentData())
+        combo = self.combo_od_type
+        combo.blockSignals(True)
+        combo.clear()
+        for text, data in items:
+            combo.addItem(text, data)
+        i = combo.findData(prev)
+        if i < 0:
+            kind = prev.split('@')[0]
+            i = next((n for n, (_t, d) in enumerate(items) if d.split('@')[0] == kind), 0)
+        combo.setCurrentIndex(i if items else -1)
+        combo.blockSignals(False)
 
     def _od_current_entry(self):
         key = self.combo_od_no.currentData()
@@ -860,8 +1133,16 @@ class OpendataMixin:
                 self, '森林資源情報',
                 'データはプロジェクトのフォルダに保存します。\n先にプロジェクトを保存してください。')
             return
-        t = self.combo_od_type.currentData()
+        kind, _sep, folder = (self.combo_od_type.currentData() or '').partition('@')
         got = self._od_load_index().get(e['key'], {})
+        want = None  # 「メッシュ」「ポリゴン」で、どのフォルダかまだわからないとき：取得した ZIP の中で形を見て決める
+        if kind in ('grid', 'polygon'):
+            if folder:
+                t = folder
+            else:
+                t, want = None, kind
+        else:
+            t = kind
         if t == 'rinso':
             if not e['rinso']:
                 self._od_set_status('この解析範囲には林相識別図がありません', warn=True)
@@ -873,6 +1154,11 @@ class OpendataMixin:
                     '取得します。展開後はさらに容量が必要です。取得しますか？'
             ) != QMessageBox.StandardButton.Yes:
                 return
+        elif want:
+            if not e['vec']:
+                self._od_set_status('この解析範囲にはベクタのデータ（メッシュ・ポリゴン）がありません', warn=True)
+                return
+            need = True
         else:
             need = _ZIP_LAYERS[t][3] not in got.get('layers', [])
         if not need:
@@ -880,11 +1166,11 @@ class OpendataMixin:
             return
         tmp = os.path.join(shared, '_download')
         job = {'key': e['key'], 'entry': e, 'type': t,
-               'types': [t] if t in _ZIP_LAYERS else [],
+               'types': [t] if t in _ZIP_LAYERS else [], 'want': want,
                'gpkg': os.path.join(shared, e['key'] + '.gpkg'),
                'rinso_dir': os.path.join(shared, 'rinso', e['key']),
                'downloads': [], 'zip_rinso': []}
-        if t in _ZIP_LAYERS and e['vec']:
+        if (t in _ZIP_LAYERS or want) and e['vec']:
             job['zip_vec'] = os.path.join(tmp, e['vec']['id'] + '.zip')
             job['downloads'].append((e['vec']['url'], job['zip_vec']))
         if t == 'rinso':
@@ -984,6 +1270,9 @@ class OpendataMixin:
             'gpkg': os.path.basename(job['gpkg']) if layers else None,
             'layers': layers,
             'formats': {**old.get('formats', {}), **result.get('formats', {})},
+            # ZIP の中のフォルダごとのデータの形（メッシュかポリゴンか）。ZIP の中を見たときはすべてのフォルダがわかる
+            'shapes': {**old.get('shapes', {}), **result.get('shapes', {})},
+            'shapes_complete': bool(old.get('shapes_complete') or 'shapes' in result),
             'rasters': sorted(set(old.get('rasters', [])) | {
                 os.path.relpath(p, self._od_shared_dir()) for p in result['rasters']}),
             'fetched_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
@@ -991,7 +1280,14 @@ class OpendataMixin:
         }
         self._od_save_index(idx)
         self._od_current_job = self._od_downloader = None
-        self._od_show(e, job['type'])
+        self._od_fill_types()  # 形がわかったので、「種類」の欄をこのデータに合わせる
+        if result.get('missing'):
+            label = dict(_FCDS_TYPES).get(result['missing'], '')
+            self._od_set_status(f'このデータには{label}がありません', warn=True)
+            self._od_render_left()
+            self._od_update_buttons()
+            return
+        self._od_show(e, result.get('type') or job['type'])
 
     def _od_job_failed(self, msg):
         if self._od_shutting_down:
@@ -1014,6 +1310,7 @@ class OpendataMixin:
     def _od_cancel_all(self):
         """プラグイン終了時：進行中の取得を止め、属性テーブルを外す。"""
         self._od_shutting_down = True
+        self._od_cancel_plan_stats()
         self._od_set_attr_layer(None)
         downloader = self._od_downloader
         if downloader is not None:
@@ -1088,9 +1385,14 @@ class OpendataMixin:
             lname = _ZIP_LAYERS[t][3]
             gpkg = os.path.join(shared, rec['gpkg']) if rec.get('gpkg') else None
             if gpkg and lname in rec.get('layers', []):
-                lyr = QgsVectorLayer(f'{gpkg}|layername={lname}', lname, 'ogr')
+                # 凡例の名前・スタイルはデータの形（メッシュ／ポリゴン）で決める（GPKG のレイヤー名は県のフォルダの区分）
+                lyr = QgsVectorLayer(f'{gpkg}|layername={lname}', self._od_lname_label(e['key'], lname), 'ogr')
                 if lyr.isValid():
-                    self._od_style_layer(lyr, t)
+                    style = t
+                    if t in _SHAPE_FOLDERS:
+                        info = self._od_layer_shape(e['key'], t)
+                        style = 'mesh' if info and info.get('shape') == 'grid' else 'species'
+                    self._od_style_layer(lyr, style)
                     QgsProject.instance().addMapLayer(lyr, False)
                     grp.addLayer(lyr).setExpanded(False)  # 凡例（樹種の一覧）は閉じておく
                     shown = lyr
@@ -1114,7 +1416,7 @@ class OpendataMixin:
             self._od_set_attr_layer(shown)
         if shown is not None and t not in _ZIP_LAYERS:
             self._od_show_rinso_info(e['key'], rec, shared)
-        label = self.combo_od_type.itemText(self.combo_od_type.findData(t))
+        label = self._od_shown_label() if shown else self._od_lname_label(e['key'], _ZIP_LAYERS.get(t, ('',) * 4)[3])
         # 色分けがふつうと違うとき（小班ごとの集計・樹種の列が無い）は、そのことを添える
         note = ''
         if t in _ZIP_LAYERS:
@@ -1132,7 +1434,8 @@ class OpendataMixin:
 
     def _od_style_layer(self, lyr, t):
         """解析元（下田市・南伊豆町・松崎町）のレイヤーから書き出したスタイルを当て、
-        色分けの列を樹種名をそろえた 樹種_統一 に差し替える。"""
+        色分けの列を樹種名をそろえた 樹種_統一 に差し替える。
+        t：スタイルの種類（mesh＝メッシュ、species＝ポリゴン、points＝単木ポイント）。"""
         qml = os.path.join(_STYLE_DIR, f'{t}.qml')
         if os.path.exists(qml):
             lyr.loadNamedStyle(qml)
@@ -1257,11 +1560,10 @@ class OpendataMixin:
             return cached, True, cached.get('src', ''), None
         footprint = fp_crs = None
         src = ''
-        for lname in ('メッシュ', '単木ポイント'):
-            st = (rec.get('stats') or {}).get(lname) or {}
+        for lname, st in (rec.get('stats') or {}).items():
             if st.get('footprint'):
                 footprint, fp_crs = QgsGeometry.fromWkt(st['footprint']), 'EPSG:6676'
-                src = f"{st.get('footprint_src', lname)}のある範囲"
+                src = f"{self._od_lname_label(key, st.get('footprint_src', lname))}のある範囲"
                 break
         if footprint is None and rec.get('rasters'):
             paths = [os.path.join(shared, rel) for rel in rec['rasters']
@@ -1510,6 +1812,58 @@ class OpendataMixin:
         return out
 
     # ------------------------------------------------------------------
+    # データの形（メッシュ・ポリゴン）
+    # ------------------------------------------------------------------
+
+    def _od_layer_shape(self, key, folder):
+        """取得済みのフォルダ folder（_ZIP_LAYERS のキー）のデータの形 {'shape', 'cell'}。
+        記録に無ければ（以前の版で取得したデータ）、GPKG の先頭の地物の面積から求めて記録に残す。"""
+        if folder not in _SHAPE_FOLDERS:
+            return None
+        idx = self._od_load_index()
+        rec = idx.get(key)
+        if not rec:
+            return None
+        info = (rec.get('shapes') or {}).get(folder)
+        if info:
+            return info
+        lname = _ZIP_LAYERS[folder][3]
+        if lname not in rec.get('layers', []) or not rec.get('gpkg'):
+            return None
+        lyr = QgsVectorLayer(f"{os.path.join(self._od_shared_dir(), rec['gpkg'])}|layername={lname}", lname, 'ogr')
+        if not lyr.isValid():
+            return None
+        areas = [f.geometry().area() for f in lyr.getFeatures(
+            QgsFeatureRequest().setLimit(300).setNoAttributes()) if f.hasGeometry()]
+        info = _classify_areas(areas)
+        rec.setdefault('shapes', {})[folder] = info
+        self._od_save_index(idx)
+        return info
+
+    def _od_stats_spec(self):
+        """表示中のデータの統計の決まり (集計の決まり, 1セルの面積 ha)。
+        統計を出すのはデータの形がメッシュのものと単木ポイント。ポリゴンは (None, None)。"""
+        if not self._od_shown:
+            return None, None
+        key, t = self._od_shown
+        if t == 'points':
+            return '単木ポイント', None
+        info = self._od_layer_shape(key, t)
+        if info and info.get('shape') == 'grid':
+            cell = info.get('cell')
+            return 'メッシュ', (cell * cell / 10000 if cell else None)
+        return None, None
+
+    def _od_footprint_src(self, key, t, rec):
+        """計画図との重なりに使う範囲を作るレイヤー。メッシュはそれ自身、単木ポイントは同じ GPKG の面のデータ
+        （メッシュを優先。点からは範囲の形を作りにくいので、面のデータで代える）。"""
+        if t != 'points':
+            return _ZIP_LAYERS[t][3]
+        folders = [f for f in _SHAPE_FOLDERS if _ZIP_LAYERS[f][3] in rec.get('layers', [])]
+        folders.sort(key=lambda f: (self._od_layer_shape(key, f) or {}).get('shape') != 'grid')
+        return _ZIP_LAYERS[folders[0]][3] if folders else None
+
+    # ------------------------------------------------------------------
     # データ全体の統計（何も選んでいないとき、表の場所に出す）
     # ------------------------------------------------------------------
 
@@ -1522,8 +1876,9 @@ class OpendataMixin:
         if t not in _ZIP_LAYERS:
             return
         lname = _ZIP_LAYERS[t][3]
-        if lname not in _StatsWorker._SPEC:
-            return
+        spec, cell_ha = self._od_stats_spec()
+        if spec is None:
+            return  # ポリゴンは統計を出さない
         shared = self._od_shared_dir()
         rec = self._od_load_index().get(key) if shared else None
         if not rec or not rec.get('gpkg'):
@@ -1536,25 +1891,42 @@ class OpendataMixin:
         plan, has_plan, src, missing = None, False, '', None
         if stats is not None:
             plan, has_plan, src, missing = self._od_number_overlap(key, rec, shared)
-        self.txt_od_rinso.setHtml(self._od_stats_html(lname, stats, plan, has_plan, src, missing))
+        self.txt_od_rinso.setHtml(self._od_stats_html(spec, stats, plan, has_plan, src, missing))
         if stats is None:
-            self._od_start_stats(key, os.path.join(shared, rec['gpkg']), lname)
+            self._od_start_stats(key, os.path.join(shared, rec['gpkg']), lname,
+                                 spec, cell_ha, self._od_footprint_src(key, t, rec))
 
-    def _od_start_stats(self, key, gpkg, lname):
+    def _od_start_stats(self, key, gpkg, lname, spec, cell_ha, fp_src):
         running = getattr(self, '_od_stats_running', None)
         if running is None:
             running = self._od_stats_running = set()
         if (key, lname) in running:
             return
         running.add((key, lname))
-        worker = _StatsWorker(key, gpkg, lname)
+        worker = _StatsWorker(key, gpkg, lname, spec, cell_ha, fp_src)
         # 終わるまで参照を持っておく（実行中の QThread が捨てられると QGIS ごと落ちる）
         _OD_ORPHANED_WORKERS.add(worker)
         worker.finished.connect(lambda w=worker: _OD_ORPHANED_WORKERS.discard(w))
         worker.finished_ok.connect(self._od_stats_done)
         worker.failed.connect(self._od_stats_failed)
-        self._od_set_status(f'{lname}の全体の統計を求めています…')
+        self._od_set_status(f'{self._od_shown_label()}の全体の統計を求めています…')
         worker.start()
+
+    def _od_lname_label(self, key, lname):
+        """GPKG のレイヤー名（県のフォルダの区分）を、画面に出す名前（メッシュ／ポリゴン／単木ポイント）にする。"""
+        folder = next((t for t, v in _ZIP_LAYERS.items() if v[3] == lname), None)
+        if folder in _SHAPE_FOLDERS:
+            return _shape_label(self._od_layer_shape(key, folder))
+        return dict((k, label) for k, label in _FCDS_TYPES).get(folder, lname)
+
+    def _od_shown_label(self):
+        """表示中のデータの表示名（メッシュ（20m×20m）／ポリゴン／単木ポイント／林相識別図）。"""
+        if not self._od_shown:
+            return ''
+        key, t = self._od_shown
+        if t in _SHAPE_FOLDERS:
+            return _shape_label(self._od_layer_shape(key, t))
+        return dict((k, label) for k, label in _FCDS_TYPES).get(t, '')
 
     def _od_stats_done(self, key, lname, stats):
         getattr(self, '_od_stats_running', set()).discard((key, lname))
@@ -1565,7 +1937,9 @@ class OpendataMixin:
             idx[key].setdefault('stats', {})[lname] = stats
             self._od_save_index(idx)
         # まだ同じデータを表示していて、表が空（何も選んでいない）なら出し直す
+        # （選んだ小班の範囲の統計を出しているときは、そのままにする）
         if (self._od_shown and self._od_shown[0] == key and self._od_attr is None
+                and getattr(self, '_od_table_mode', None) != 'plan_stats'
                 and _ZIP_LAYERS.get(self._od_shown[1], (None,) * 4)[3] == lname):
             self._od_show_data_stats()
             self._od_set_status('計画図レイヤーで小班を選択すると、その小班にかかる地物を表に出します')
@@ -1574,36 +1948,64 @@ class OpendataMixin:
         getattr(self, '_od_stats_running', set()).discard((key, lname))
         if getattr(self, '_od_shutting_down', False):
             return
-        self._od_set_status(f'{lname}の全体の統計を求められませんでした：{message}', warn=True)
+        self._od_set_status(f'{self._od_shown_label()}の全体の統計を求められませんでした：{message}', warn=True)
 
-    def _od_stats_html(self, lname, stats, plan, has_plan, src, missing):
-        row = self._od_info_row
+    def _od_stats_html(self, spec, stats, plan, has_plan, src, missing):
+        """spec：集計の決まり（'メッシュ'／'単木ポイント'）。"""
         out = ['<table style="border-collapse:collapse;width:100%;">',
-               self._info_title_row(html.escape(f'データ全体の統計（{lname}）'))]
+               self._info_title_row(html.escape(f'データ全体の統計（{self._od_shown_label()}）'))]
+        out += self._od_stats_rows(spec, stats, '求めています…（初回だけ時間がかかります）')
+        out.append('</table>')
+        title = f'計画図との重なり（{src}）' if src else '計画図との重なり'
+        out += self._od_plan_overlap_html(title, plan, has_plan,
+                                          '求めています…' if stats is None else missing)
+        out.append('<p style="color:gray;margin-top:8px;">計画図レイヤーで小班を選ぶと、その範囲の統計を出します。'
+                   '地図で地物を選ぶと、その地物を表に出します。</p>')
+        return ''.join(out)
+
+    def _od_stats_rows(self, lname, stats, pending, show_area=True, per_ha=None):
+        """統計の表の行（件数・面積・材積・本数・平均・樹種）。stats が None なら pending の文を出す。
+        lname：集計の決まり（'メッシュ'／'単木ポイント'）。
+        show_area=False：「メッシュデータの面積」を出さない（同じ広さを別の行で出しているとき）。
+        per_ha：haあたり（ha材積・立木密度）の分母にする面積。None なら材積のある森林の面積で割る。"""
+        row = self._od_info_row
+        out = []
         if stats is None:
-            out.append(row('—', '求めています…（初回だけ時間がかかります）'))
+            out.append(row('—', pending))
         else:
             n = stats.get('count') or 0
             sums, avgs = stats.get('sum', {}), stats.get('avg', {})
             unit = stats.get('unit') or ('セル' if lname == 'メッシュ' else '本')
             out.append(row(f'{unit}数', f'{n:,} {unit}'))
             area = sums.get('面積_ha')
-            if area:
-                out.append(row('データのある面積', f'{area:,.1f} ha'))
-            # haあたりの分母は対象の森林（材積の入っているところ）。土地全体の面積ではない
+            # 面積の列の合計。メッシュの代わりに小班ごとの集計が入っているデータでは小班の面積の合計
+            area_name = '小班集計データの面積' if unit == '小班' else f'{lname}データの面積'
+            if area and show_area:
+                out.append(row(area_name, f'{area:,.1f} ha'))
+            # データ全体の統計では、haあたりの分母は対象の森林（材積の入っているところ）。土地全体の面積ではない
             forest = sums.get('森林面積')
             if forest:
                 out.append(row('材積のある森林の面積', f'{forest:,.1f} ha'))
             vol = sums.get('合計材積', sums.get('単木材積'))
             if vol is not None:
                 out.append(row('材積合計', f'{vol:,.0f} m³'))
-            if forest and vol is not None:
-                out.append(row('ha材積', f'{vol / forest:,.0f} m³/ha'))
+            # 選んだ範囲の統計は、範囲の面積で割る（小班で見るときは小班の面積あたりが知りたい値。
+            # 材積のある森林の面積で割ると、広葉樹ばかりの小班でも材積のある数セルの値になる）
+            # データ全体の統計では、メッシュデータの面積（メッシュ全体）で割った値も並べる。厳密ではないが、
+            # 選んだ範囲の統計（範囲の面積で割る）と同じ見方で比べられる
+            if per_ha is not None:
+                denoms = [('範囲の面積あたり', per_ha)]
+            else:
+                denoms = [('材積のある森林あたり', forest), (f'{area_name}あたり', area)]
+            denoms = [(label, d) for label, d in denoms if d]
+            if vol is not None:
+                for label, d in denoms:
+                    out.append(row(f'ha材積（{label}）', f'{vol / d:,.0f} m³/ha'))
             trees = sums.get('立木本数')
             if trees is not None:
                 out.append(row('立木本数', f'{trees:,.0f} 本'))
-                if forest:
-                    out.append(row('立木密度', f'{trees / forest:,.0f} 本/ha'))
+                for label, d in denoms:
+                    out.append(row(f'立木密度（{label}）', f'{trees / d:,.0f} 本/ha'))
             cell = f'材積のある{unit}の平均'
             labels = {'平均樹高': ('平均樹高', 'm', cell), '平均直径': ('平均直径', 'cm', cell),
                       '樹高': ('樹高', 'm', '平均'), '胸高直径': ('胸高直径', 'cm', '平均')}
@@ -1615,12 +2017,193 @@ class OpendataMixin:
             if species and n:
                 text = '、'.join(f'{name} {cnt:,}（{cnt / n:.0%}）' for name, cnt in species)
                 out.append(row(f'樹種（{unit}数）', text))
+        return out
+
+    # ------------------------------------------------------------------
+    # 計画図で選んだ小班の範囲の統計（表の場所に出す）
+    # ------------------------------------------------------------------
+
+    def _od_plan_selected_count(self):
+        plan = self._connected_layer
+        try:
+            return plan.selectedFeatureCount() if plan is not None and not sip.isdeleted(plan) else 0
+        except RuntimeError:
+            return 0  # 計画図レイヤーが削除済み
+
+    def _od_plan_mask_geoms(self, layer, rec):
+        """選択中の小班のうち、このデータの範囲にかかるものの形（表示中のレイヤーの座標系）。
+        データの範囲（統計と一緒に求めた形、無ければレイヤーの範囲）から先に小班を絞るので、
+        計画図の全件を選んでいても、読むのは範囲の中の小班だけになる。"""
+        from qgis.core import QgsCoordinateTransform
+        plan = self._connected_layer
+        selected = set(plan.selectedFeatureIds())
+        fp = None
+        for st in (rec.get('stats') or {}).values():
+            if st.get('footprint'):
+                fp = QgsGeometry.fromWkt(st['footprint'])  # 表示中のレイヤーと同じ座標系
+                break
+        to_plan = to_layer = None
+        if plan.crs() != layer.crs():
+            to_plan = QgsCoordinateTransform(layer.crs(), plan.crs(), QgsProject.instance())
+            to_layer = QgsCoordinateTransform(plan.crs(), layer.crs(), QgsProject.instance())
+        engine = None
+        fp_layer = QgsGeometry(fp) if fp is not None and not fp.isEmpty() else None
+        if fp_layer is not None:
+            if to_plan is not None:
+                fp.transform(to_plan)
+            bbox = fp.boundingBox()
+            engine = QgsGeometry.createGeometryEngine(fp.constGet())
+            engine.prepareGeometry()
+        else:
+            bbox = layer.extent()
+            if to_plan is not None:
+                bbox = to_plan.transformBoundingBox(bbox)
+        req = QgsFeatureRequest().setNoAttributes()
+        # 選んだ小班が少なければ選んだものだけ、多ければ範囲の中の小班から選んだものを拾う
+        if len(selected) <= 2000:
+            req.setFilterFids(list(selected))
+            feats = (f for f in plan.getFeatures(req) if bbox.intersects(f.geometry().boundingBox()))
+        else:
+            req.setFilterRect(bbox)
+            feats = (f for f in plan.getFeatures(req) if f.id() in selected)
+        out = []
+        for f in feats:
+            g = f.geometry()
+            if g is None or g.isEmpty():
+                continue
+            if engine is not None and not engine.intersects(g.constGet()):
+                continue
+            g = QgsGeometry(g)
+            if to_layer is not None:
+                g.transform(to_layer)
+            out.append(g)
+        # 全件を選んでいるか（件数ではなく「計画図の全体」と書くため）
+        whole = len(selected) >= plan.featureCount()
+        return out, whole, fp_layer
+
+    def _od_show_plan_stats(self, layer):
+        """計画図で選んだ小班の範囲にある、表示中のデータの統計を表の場所に出す（集計は別スレッド）。"""
+        self._od_table_mode = 'plan_stats'
+        key, t = self._od_shown
+        lname = _ZIP_LAYERS[t][3]
+        shared = self._od_shared_dir()
+        rec = self._od_load_index().get(key) if shared else None
+        self.stack_od.setCurrentIndex(1)
+        if not rec or not rec.get('gpkg'):
+            self.txt_od_rinso.setHtml('')
+            return
+        try:
+            geoms, whole, fp = self._od_plan_mask_geoms(layer, rec)
+        except RuntimeError:
+            return  # 計画図レイヤーが削除済み
+        gen = self._od_plan_gen
+        spec, cell_ha = self._od_stats_spec()  # ポリゴンは統計を求めず、小班の中の地物を表に出す
+        self._od_plan_ctx = (gen, spec, whole, bool(geoms))
+        # ポリゴンは統計を出さず、見つけた地物を表に出す（見つけるまで表の場所は空にしておく）
+        self.txt_od_rinso.setHtml(self._od_plan_stats_html(None) if spec else '')
+        if not geoms:
+            self._od_set_status('選択中の範囲は、このデータの範囲にかかりません')
+            return
+        self._od_set_status('選択中の範囲の統計を求めています…' if spec
+                            else '選択中の小班の中にある地物を探しています…')
+        box = self._od_union_bbox(geoms)
+        worker = _PlanStatsWorker(
+            gen, os.path.join(shared, rec['gpkg']), lname, [bytes(g.asWkb()) for g in geoms],
+            (box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum()),
+            bytes(fp.asWkb()) if fp is not None else None, spec, cell_ha)
+        # 終わるまで参照を持っておく（実行中の QThread が捨てられると QGIS ごと落ちる）
+        _OD_ORPHANED_WORKERS.add(worker)
+        worker.finished.connect(lambda w=worker: _OD_ORPHANED_WORKERS.discard(w))
+        worker.finished_ok.connect(self._od_plan_stats_done)
+        worker.failed.connect(self._od_plan_stats_failed)
+        worker.progress.connect(self._od_plan_stats_progress)
+        self._od_plan_worker = worker
+        self.bar_od_progress.setValue(0)
+        self.bar_od_progress.setFormat('%p%')
+        self._od_progress_timer.start()
+        worker.start()
+
+    def _od_plan_stats_progress(self, gen, pct, text):
+        ctx = getattr(self, '_od_plan_ctx', None)
+        if (getattr(self, '_od_shutting_down', False) or ctx is None or ctx[0] != gen
+                or sip.isdeleted(self.bar_od_progress)):
+            return
+        self.bar_od_progress.setValue(pct)
+        self.bar_od_progress.setToolTip(text)
+        what = '選択中の範囲の統計を求めています' if ctx[1] else '選択中の小班の中にある地物を探しています'
+        self._od_set_status(f'{what}…（{text}）')
+
+    def _od_hide_progress(self):
+        bar = getattr(self, 'bar_od_progress', None)
+        if bar is None or sip.isdeleted(bar):
+            return
+        timer = getattr(self, '_od_progress_timer', None)
+        if timer is not None and not sip.isdeleted(timer):
+            timer.stop()
+        bar.setVisible(False)
+
+    @staticmethod
+    def _od_union_bbox(geoms):
+        box = QgsGeometry(geoms[0]).boundingBox()
+        for g in geoms[1:]:
+            box.combineExtentWith(g.boundingBox())
+        return box
+
+    def _od_cancel_plan_stats(self):
+        worker = getattr(self, '_od_plan_worker', None)
+        if worker is not None:
+            worker.cancelled = True
+            self._od_plan_worker = None
+        self._od_hide_progress()
+
+    def _od_plan_stats_done(self, gen, stats):
+        ctx = getattr(self, '_od_plan_ctx', None)
+        if (getattr(self, '_od_shutting_down', False) or ctx is None or ctx[0] != gen
+                or sip.isdeleted(self.txt_od_rinso)):
+            return
+        self._od_plan_worker = None
+        self._od_hide_progress()
+        if 'fids' in stats:
+            layer = self._od_shown_layer()
+            if layer is not None:
+                self._od_build_table(layer, stats['fids'], 'plan')
+            return
+        self.txt_od_rinso.setHtml(self._od_plan_stats_html(stats))
+        self._od_set_status('計画図の全体の統計' if ctx[2] else '選択中の範囲の統計')
+
+    def _od_plan_stats_failed(self, gen, message):
+        ctx = getattr(self, '_od_plan_ctx', None)
+        if getattr(self, '_od_shutting_down', False) or ctx is None or ctx[0] != gen:
+            return
+        self._od_plan_worker = None
+        self._od_hide_progress()
+        self._od_set_status(f'選択中の範囲の統計を求められませんでした：{message}', warn=True)
+
+    def _od_plan_stats_html(self, stats):
+        _gen, lname, whole, n_in = self._od_plan_ctx  # lname：集計の決まり（'メッシュ'／'単木ポイント'／None）
+        row = self._od_info_row
+        scope = '計画図の全体' if whole else '選択中の範囲'
+        out = ['<table style="border-collapse:collapse;width:100%;">',
+               self._info_title_row(html.escape(f'{scope}の統計（{self._od_shown_label()}）'))]
+        # 小班の数は出さない（同じ場所に枝番・整理番号違いの小班が重なっていることがあり、
+        # 数えると場所としての広さと合わない）。広さは面積で出す
+        if not n_in:
+            out.append(row('このデータにかかる部分', 'ありません'))
+        elif stats is None:
+            out.append(row('このデータにかかる部分', '求めています…'))
+        else:
+            out.append(row('このデータにかかる部分', f"約 {stats.get('area_ha', 0):,.1f} ha"))
+        if n_in:
+            out += self._od_stats_rows(lname, stats, '求めています…', show_area=False,
+                                       per_ha=(stats or {}).get('area_ha'))
         out.append('</table>')
-        title = f'計画図との重なり（{src}）' if src else '計画図との重なり'
-        out += self._od_plan_overlap_html(title, plan, has_plan,
-                                          '求めています…' if stats is None else missing)
-        out.append('<p style="color:gray;margin-top:8px;">計画図レイヤーで小班を選ぶか、'
-                   '地図で地物を選ぶと、その地物を表に出します。</p>')
+        if n_in:
+            what = 'セル' if lname == 'メッシュ' else '地物'
+            note = (f'{what}の中心が小班の中にあるものを集計しています（境界の{what}は中心の位置で振り分け）。')
+            if stats is not None and stats.get('approx'):
+                note += f'中心の位置は約 {stats.get("res", 0):.1f}m の細かさで見たおおよそのものです。'
+            out.append(f'<p style="color:gray;margin-top:8px;">{html.escape(note)}</p>')
+        out.append('<p style="color:gray;margin-top:8px;">地図で地物を選ぶと、その地物を表に出します。</p>')
         return ''.join(out)
 
     # ------------------------------------------------------------------
@@ -1682,61 +2265,46 @@ class OpendataMixin:
         # 小班の面積はふつう数 ha まで。半分以上が 5 ha 未満なら小さいポリゴンとみなす
         return cells >= len(areas) * 0.9 or areas[len(areas) // 2] < 50000
 
-    def _od_plan_geoms(self, layer):
-        """計画図レイヤーで選んでいる小班の形（表示中のレイヤーの座標系に合わせる）。"""
-        plan = self._connected_layer
-        if plan is None:
-            return []
-        try:
-            feats = list(plan.getSelectedFeatures())
-        except RuntimeError:
-            return []  # 計画図レイヤーが削除済み
-        xf = None
-        if plan.crs() != layer.crs():
-            from qgis.core import QgsCoordinateTransform
-            xf = QgsCoordinateTransform(plan.crs(), layer.crs(), QgsProject.instance())
-        out = []
-        for f in feats:
-            g = f.geometry()
-            if g is None or g.isEmpty():
-                continue
-            g = QgsGeometry(g)
-            if xf is not None:
-                g.transform(xf)
-            out.append(g)
-        return out
-
     def _od_refresh_table(self):
-        """森林簿タブと同じく、選んだものを表に出す。
-        計画図で選んだ小班にかかる地物か、表示中のレイヤーで地図から直接選んだ地物の、
-        後から選んだほうを出す。どちらも無ければ表は空にする。"""
+        """選んだものを表の場所に出す。表示中のレイヤーで地図から直接選んだ地物は表に、
+        計画図で選んだ小班は、その範囲の統計にする（後から選んだほうを出す）。
+        どちらも無ければデータ全体の統計を出す。"""
         layer = self._od_shown_layer()
         self._od_table_fid = None
-        self._od_table_mode = None     # 表の中身：'plan'＝小班にかかる地物、'direct'＝直接選んだ地物
+        self._od_table_mode = None     # 表の場所：'direct'＝直接選んだ地物の表、'plan_stats'＝小班の範囲の統計
+        # 選び直したら、前の選択で求めている統計は要らない
+        self._od_plan_gen = getattr(self, '_od_plan_gen', 0) + 1
+        self._od_cancel_plan_stats()
         self._od_drop_attr()
         if layer is None:
             return
         grid = getattr(self, '_od_layer_is_grid', True)
         if grid:
-            geoms = self._od_plan_geoms(layer)
+            plan_sel = self._od_plan_selected_count()
             direct = list(layer.selectedFeatureIds())
             # 両方あれば後から選んだほう（_od_table_source）を出す
-            if direct and (not geoms or getattr(self, '_od_table_source', None) == 'direct'):
+            if direct and (not plan_sel or getattr(self, '_od_table_source', None) == 'direct'):
                 fids = direct
                 self._od_table_mode = 'direct'
-            elif not geoms:
-                self._od_set_status('計画図レイヤーで小班を選択すると、その小班にかかる地物を表に出します')
+            elif plan_sel:
+                self._od_show_plan_stats(layer)
+                return
+            else:
+                # 選択が無くなったら、前の選択の範囲の統計を消してから全体の表示に戻す
+                # （全体の統計を出せないデータでは、表の場所は空になる）
+                self.txt_od_rinso.clear()
+                self.stack_od.setCurrentIndex(0)
+                self._od_set_status('計画図レイヤーで小班を選択すると、その小班の範囲の統計を出します')
                 self._od_show_data_stats()  # 何も選んでいないときは、データ全体の統計を出す
                 return
-        if grid and self._od_table_mode is None:
-            self._od_table_mode = 'plan'
-            union = QgsGeometry.unaryUnion(geoms)
-            engine = QgsGeometry.createGeometryEngine(union.constGet())
-            engine.prepareGeometry()
-            req = QgsFeatureRequest().setFilterRect(union.boundingBox()).setNoAttributes()
-            fids = [f.id() for f in layer.getFeatures(req)
-                    if f.hasGeometry() and engine.intersects(f.geometry().constGet())]
+        self._od_build_table(layer, fids if grid else None, self._od_table_mode)
+
+    def _od_build_table(self, layer, fids, mode):
+        """表示中のレイヤーの属性の表を作る。fids が None なら全件。
+        mode：'direct'＝地図で直接選んだ地物、'plan'＝選んだ小班の中にある地物（統計を出さないデータ）。"""
+        self._od_table_mode = mode
         canvas = self.iface.mapCanvas()
+        grid = fids is not None
         # 読み込み中は画面が止まるので、先に件数を出して描き直しておく（固まったように見せない）。
         # 描き直しだけにし、操作は受け付けない（読み込みの途中で表を作り直されないように）
         total = len(fids) if grid else layer.featureCount()
@@ -1779,10 +2347,10 @@ class OpendataMixin:
                 self.tbl_od.setColumnHidden(col, True)
         self._od_attr = (cache, model, filt, sel)
         sel.currentRowChanged.connect(self._od_on_table_current_row)
-        if self._od_table_mode == 'direct':
+        if mode == 'direct':
             self._od_set_status(f'地図で選択中の{layer.name()}：{len(fids)} 件')
-        elif grid:
-            self._od_set_status(f'選択中の小班にかかる{layer.name()}：{len(fids)} 件')
+        elif mode == 'plan':
+            self._od_set_status(f'選択中の小班の中にある{layer.name()}：{len(fids)} 件')
         else:
             self._od_set_status(f'{layer.name()}（樹種ごとにまとめた形のため全件）：{layer.featureCount()} 件')
 
@@ -1843,7 +2411,33 @@ class OpendataMixin:
             else:
                 self._od_table_source = None
             self._od_refresh_table()
+        else:
+            # まとめた形のポリゴンは表が全件なので、地図で選んだ地物の行を選んで、そこまで表を送る
+            ids = list(selected or []) or list(layer.selectedFeatureIds())
+            self._od_select_table_row(ids[-1] if ids else None)
         self._od_render_left(focus_left=True)
+
+    def _od_select_table_row(self, fid):
+        """表の中で地物 fid の行を選び、そこまで表を送る（地図で選んだとき）。fid が None なら行の選択を外す。
+        地図で選んだ地物なので、地図のハイライト・移動はしない（左パネルの表示だけ変える）。"""
+        attr = self._od_attr
+        if attr is None:
+            return
+        _cache, _model, filt, sel = attr
+        if fid is None:
+            sel.clear()
+            return
+        index = filt.fidToIndex(fid)
+        if not index.isValid():
+            return
+        self._od_row_from_map = True
+        try:
+            sel.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                | QItemSelectionModel.SelectionFlag.Rows)
+        finally:
+            self._od_row_from_map = False
+        self.tbl_od.scrollTo(index)
+        self._od_table_fid = fid
 
     def _od_on_table_current_row(self, current, previous):
         """クリック・十字キーで現在の行が変わった。QGIS の選択状態は変えず、
@@ -1858,8 +2452,10 @@ class OpendataMixin:
         if layer is None or self._od_table_fid is None or self.cloud_tab.currentIndex() != _TAB_INDEX:
             return
         self._clear_selection_highlights()
-        # まとめた形のポリゴンは1件が全域にまたがるので、地図とは連動させない（左パネルに出すだけ）
-        if getattr(self, '_od_layer_is_grid', True):
+        # 地図で選んだ地物の行を選んだときは、地図はそのまま（左パネルに出すだけ）。
+        # 表で選んだときは赤くハイライトして位置を合わせる。まとめた形のポリゴンも同じで、
+        # 「画面ロック」「選択時のズームを無効化」がオンならその設定に従う
+        if not getattr(self, '_od_row_from_map', False):
             f = next(layer.getFeatures(QgsFeatureRequest().setFilterFid(self._od_table_fid)), None)
             if f is not None and f.hasGeometry():
                 self._add_selection_highlight(f.geometry(), layer.crs())

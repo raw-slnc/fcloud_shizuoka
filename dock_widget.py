@@ -8,10 +8,10 @@ import urllib.parse
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QTabWidget, QTextBrowser,
-    QPushButton, QFrame, QMessageBox, QCheckBox,
+    QPushButton, QFrame, QMessageBox, QCheckBox, QApplication,
 )
 from qgis.PyQt.QtCore import (
-    Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal, QObject, QEvent,
+    Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal, QObject, QEvent, QModelIndex,
 )
 from qgis.PyQt.QtGui import (
     QColor, QDesktopServices, QKeySequence, QTextCursor, QTextTable,
@@ -20,7 +20,7 @@ from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer,
     QgsNetworkAccessManager, QgsCoordinateTransform, QgsWkbTypes,
-    QgsLayerTreeLayer, QgsFeatureRequest,
+    QgsLayerTreeLayer, QgsFeatureRequest, QgsGeometry,
 )
 from qgis.gui import QgsRubberBand
 
@@ -78,23 +78,30 @@ def _copy_table_selection(table):
     """見出し行＋選択行を TSV（行=改行 / 列=タブ）でクリップボードへコピーする。
     見出しもデータ行と同じタブ区切り1行として先頭に入る。"""
     from qgis.PyQt.QtWidgets import QApplication
-    idxs = table.selectedIndexes()
-    if not idxs:
+    sel = table.selectionModel()
+    if sel is None or not sel.hasSelection():
         return
-    rows = sorted({i.row() for i in idxs})
-    cols = sorted({i.column() for i in idxs})
+    # 選ばれたセルの一覧（selectedIndexes）は作らず、選ばれた範囲から行と列を求める。
+    # 表で Ctrl+A を押すと一覧が行数×列数の大きさになり、止まるため
+    rows, cols = set(), set()
+    for rng in sel.selection():
+        rows.update(range(rng.top(), rng.bottom() + 1))
+        cols.update(range(rng.left(), rng.right() + 1))
+    rows, cols = sorted(rows), sorted(cols)
+    # 表のモデルから読む（QTableWidget の表も、モデルとビューを分けた表も同じように扱える）
+    model = table.model()
 
     def _header(c):
-        hi = table.horizontalHeaderItem(c)
-        return hi.text().strip() if hi is not None else ''
+        h = model.headerData(c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+        return str(h).strip() if h is not None else ''
+
+    def _cell(r, c):
+        v = model.index(r, c).data(Qt.ItemDataRole.DisplayRole)
+        return str(v).strip() if v is not None else ''
 
     lines = ['\t'.join(_header(c) for c in cols)]
     for r in rows:
-        cells = []
-        for c in cols:
-            it = table.item(r, c)
-            cells.append(it.text().strip() if it is not None else '')
-        lines.append('\t'.join(cells))
+        lines.append('\t'.join(_cell(r, c) for c in cols))
     QApplication.clipboard().setText('\n'.join(lines))
 
 
@@ -169,6 +176,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._selection_highlights   = []
         self._expanding_selection    = False  # 重なり地物の自動追加中フラグ（selectionChanged 再帰防止）
         self._clicked_fid            = None   # 直近に地図でクリックした地物 fid（左パネル表示の先頭固定用）
+        self._shinrinbo_pending      = False  # 森林簿タブ以外で選んだため、森林簿の表を作り直していない
         self._mori_markers           = []
         self._pending_replies        = []
         self._current_raw_hoanrin    = None
@@ -384,6 +392,14 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         bottom_row.addWidget(self.btn_bg_cs3d)
         bottom_row.addStretch()
 
+        # 画面の処理の中で時間がかかる処理（大量の小班を選んだときの森林簿の表など）の間だけ出す
+        # 進み具合は文字で出す（例：森林簿の表を作成中… 45%（146,920 小班））
+        self.lbl_progress = QLabel()
+        self.lbl_progress.setStyleSheet('font-size: 10px;')  # 通常の文字色（ダークテーマでも読める）
+        self.lbl_progress.setVisible(False)
+        bottom_row.addWidget(self.lbl_progress)
+        bottom_row.addSpacing(8)
+
         btn_data_info = QPushButton('データについて')
         btn_data_info.setToolTip('データについて')
         btn_data_info.setStyleSheet(_btn_style)
@@ -487,7 +503,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
     def _show_table_context_menu(self, table, pos):
         from qgis.PyQt.QtWidgets import QMenu
-        if not table.selectedIndexes():
+        # 選ばれているかだけを見る（セルの一覧は作らない。Ctrl+A のあとでも待たせないため）
+        sel = table.selectionModel()
+        if sel is None or not sel.hasSelection():
             return
         menu = QMenu(table)
         menu.addAction('選択列をコピー', lambda: _copy_table_selection(table))
@@ -794,6 +812,14 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self._refresh_map_canvas()
 
         if index == 0:  # 森林簿
+            if getattr(self, '_shinrinbo_pending', False):
+                # 森林資源情報タブを開いている間に選んだ小班の表を、いま作る
+                self._shinrinbo_pending = False
+                layer = self._connected_layer
+                if layer is not None and not sip.isdeleted(layer):
+                    self._refresh_shinrinbo_tab(
+                        self._selected_features_head() if self._layer_type == 'gpkg'
+                        else self._selected_features_sorted())
             if self._layer_type == 'gpkg':
                 self.lbl_cache_ts.setText('ローカルデータ')
             elif self._current_shinrinbo_key:
@@ -1040,8 +1066,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         self._current_shinrinbo_key = ''
         self._shinrinbo_api_ids = []
         self._shinrinbo_col_map = []
-        self.tbl_shinrinbo.setRowCount(0)
-        self.tbl_shinrinbo.setColumnCount(0)
+        self._clear_shinrinbo_table()
 
         layer_id = self.layer_combo.currentData()
         if not layer_id:
@@ -1175,18 +1200,33 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self._connected_layer = None
             return
         if not self._expanding_selection:
-            seeds = list(selected_ids) if selected_ids else self._connected_layer.selectedFeatureIds()
+            # 重なりを調べるのは、新しく選ばれた小班（パネルを開いたときは、残っている選択すべて）。
+            # 選択を外しただけのときは調べない（外した小班が重なりとしてまた加わらないように）
+            if selected_ids is None:
+                seeds = self._connected_layer.selectedFeatureIds()
+            else:
+                seeds = list(selected_ids)
             if selected_ids:
                 # 展開すると getSelectedFeatures() は fid 順になり先頭が変わるため、
                 # クリックした地物を左パネル表示用に覚えておく
                 self._clicked_fid = seeds[0] if seeds else None
-            if self._expand_selection_to_overlapping(seeds):
+            # 同じ場所の小班の森林簿を見逃さないよう、選び方・件数によらず重なっている小班を加える。
+            # 全件を選んでいるときは、加わるものがないので調べない
+            layer = self._connected_layer
+            if (seeds and layer.selectedFeatureCount() < layer.featureCount()
+                    and self._expand_selection_to_overlapping(seeds)):
                 # selectByIds が selectionChanged を同期再発火し、その中で最終状態を処理済み
                 return
-        features = list(self._connected_layer.getSelectedFeatures())
-        cf = self._clicked_fid
-        if cf is not None and len(features) > 1:
-            features.sort(key=lambda f: 0 if f.id() == cf else 1)
+        # 森林簿の表は森林簿タブを開いているときだけ作る（ほかのタブでは、森林簿タブを開いたときに作る）。
+        # 表を作らなければ、左パネルに出す先頭の1件だけ読めばよい（全件選択でも軽い）。
+        # パネルを開いたときも、残っている選択をここで処理し直すので、全件選択のままでも固まらない
+        defer_shinrinbo = self.cloud_tab.currentIndex() != 0
+        # gpkg 型の森林簿の表は、選択中の小班を表のモデルが自分で読むので、ここでは先頭の1件だけでよい
+        if defer_shinrinbo or self._layer_type == 'gpkg':
+            features = self._selected_features_head()
+        else:
+            features = self._selected_features_sorted()
+        self._shinrinbo_pending = defer_shinrinbo and bool(features)
         if not features:
             self.lbl_selected.setText('計画図レイヤーで選択してください')
             self.info_browser.clear()
@@ -1211,42 +1251,147 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.lbl_selected.setText(f'小班: {rinpan}-{junrin}-{kohan}')
         self._show_feature_info(feat)
         self.left_tab.setCurrentIndex(0)
-        self._refresh_shinrinbo_tab(features)
+        if not defer_shinrinbo:
+            self._refresh_shinrinbo_tab(features)
+        elif self.cloud_tab.currentIndex() != 6:
+            # 森林簿の表を作るときに行っていた、前に表で選んだもののハイライト・左パネルの表示の消去だけ行う
+            # （森林資源情報タブでは、ハイライトと左パネルはそのタブの処理が受け持つ）
+            self._clear_selection_highlights()
+            self._clear_cloud_record_info()
         self._od_on_plan_selection()
+
+    # ------------------------------------------------------------------
+    # 進み具合の表示（画面の処理の中で時間がかかる処理）
+    # ------------------------------------------------------------------
+
+    # これより少ない件数では出さない（すぐ終わる処理で一瞬だけ出てちらつかないように）
+    _PROGRESS_MIN_COUNT = 2000
+
+    def _progress_show(self, text):
+        self.lbl_progress.setText(text)
+        self.lbl_progress.setVisible(True)
+        self._progress_repaint()
+
+    def _progress_begin(self, text, total):
+        """進み具合を ％ で出し始める。大量の小班を選ぶと時間がかかることを利用者に知らせるためのもの。"""
+        self._progress_active = total >= self._PROGRESS_MIN_COUNT
+        if not self._progress_active:
+            return
+        self._progress_text, self._progress_total, self._progress_last = text, total, -1
+        self._progress_show(f'{text}… 0%（{total:,} 小班）')
+
+    def _progress_step(self, done, total, base=0, span=100):
+        """進み具合 done / total を、base〜base+span（%）の区間として出す。1% 変わったときだけ描き直す。"""
+        if not getattr(self, '_progress_active', False) or not total:
+            return
+        pct = base + int(span * done / total)
+        if pct != self._progress_last:
+            self._progress_last = pct
+            self._progress_show(f'{self._progress_text}… {pct}%（{self._progress_total:,} 小班）')
+
+    def _progress_end(self):
+        self._progress_active = False
+        label = getattr(self, 'lbl_progress', None)
+        if label is not None and not sip.isdeleted(label):
+            label.setVisible(False)
+
+    @staticmethod
+    def _progress_repaint():
+        # 描き直しだけにし、操作は受け付けない（処理の途中で選択などが変わらないように）
+        from qgis.PyQt.QtCore import QEventLoop
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _selected_features_sorted(self):
+        """計画図レイヤーで選択中の地物（直近にクリックした地物を先頭にする）。
+        森林簿の表を作るために読むので、件数が多いときは進み具合を出す（表を作り終えたら消す）。"""
+        layer = self._connected_layer
+        total = layer.selectedFeatureCount()
+        self._progress_begin('森林簿の表を作成中', total)
+        features = []
+        for i, f in enumerate(layer.getSelectedFeatures()):
+            features.append(f)
+            self._progress_step(i, total, 0, 50)
+        cf = self._clicked_fid
+        if cf is not None and len(features) > 1:
+            features.sort(key=lambda f: 0 if f.id() == cf else 1)
+        return features
+
+    def _selected_features_head(self):
+        """選択中の地物のうち、左パネルに出す先頭の1件だけ（直近にクリックした地物があればそれ）。"""
+        layer = self._connected_layer
+        cf = self._clicked_fid
+        if cf is not None and cf in layer.selectedFeatureIds():
+            f = next(layer.getFeatures(QgsFeatureRequest().setFilterFid(cf)), None)
+            if f is not None:
+                return [f]
+        return list(layer.getSelectedFeatures(QgsFeatureRequest().setLimit(1)))
 
     # ------------------------------------------------------------------
     # 重なり地物の自動追加選択（地点包含ベース）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _inner_point(g):
+        """形の内側の1点（取れなければ重心）。取れなければ None。"""
+        pt = g.pointOnSurface()
+        if pt is None or pt.isEmpty():
+            pt = g.centroid()
+        return None if pt is None or pt.isEmpty() else pt
+
     def _expand_selection_to_overlapping(self, seed_ids):
-        """選択された地物の「内部の一点」を覆う他地物をすべて選択に追加する。
+        """選んだ小班と同じ場所に重なっている小班を、すべて選択に加える。
         同じ位置に重なっている小班は QGIS 標準のクリック選択では最前面の1件しか
-        取れず、下の小班の森林簿が参照できないため。形状の一致ではなく
-        「その地点に重なっているか」で判定する（点包含なのでデジタイズの
-        わずかな差では取りこぼさず、形が違う重なりも拾える）。"""
+        取れず、下の小班の森林簿が参照できないため。次のどれかに当てはまる小班を加える。
+          * 同じ KEY1（整理番号違いなど。同じ KEY1 の小班は同じ場所に重なっている）
+          * 選んだ小班の内側の1点を含む（選んだ小班が、その小班の中にある）
+          * その小班の内側の1点が、選んだ小班の中にある（その小班が、選んだ小班の中にある）
+        形の一致ではなく点で判定するので、デジタイズのわずかな差では取りこぼさない。
+        市町村の境目で別の KEY1 の小班が重なっている場合も拾える。"""
         layer = self._connected_layer
         if not seed_ids:
-            return
+            return False
+        names = layer.fields().names()
+        key_attrs = ['KEY1'] if 'KEY1' in names else []
         current = set(layer.selectedFeatureIds())
         want = set(current)
-        for feat in layer.getFeatures(QgsFeatureRequest().setFilterFids(list(seed_ids))):
+        total = len(seed_ids)
+        self._progress_begin('重なっている小班を確認中', total)
+        seed_req = QgsFeatureRequest().setFilterFids(list(seed_ids))
+        seed_req.setSubsetOfAttributes(key_attrs, layer.fields())
+        for i, feat in enumerate(layer.getFeatures(seed_req)):
+            self._progress_step(i, total)
             g = feat.geometry()
             if g is None or g.isEmpty():
                 continue
-            pt = g.pointOnSurface()
-            if pt is None or pt.isEmpty():
-                pt = g.centroid()
-            if pt is None or pt.isEmpty():
+            pt = self._inner_point(g)
+            if pt is None:
                 continue
+            key = feat['KEY1'] if key_attrs else None
+            engine = None  # 選んだ小班の形（周りの小班の内側の点を調べるときだけ作る）
             req = QgsFeatureRequest().setFilterRect(g.boundingBox())
-            req.setNoAttributes()
+            req.setSubsetOfAttributes(key_attrs, layer.fields())
             for cand in layer.getFeatures(req):
                 cid = cand.id()
                 if cid in want:
                     continue
-                cg = cand.geometry()
-                if cg is not None and not cg.isEmpty() and cg.contains(pt):
+                if key and cand['KEY1'] == key:
                     want.add(cid)
+                    continue
+                cg = cand.geometry()
+                if cg is None or cg.isEmpty():
+                    continue
+                if cg.contains(pt):
+                    want.add(cid)
+                    continue
+                cpt = self._inner_point(cg)
+                if cpt is None:
+                    continue
+                if engine is None:
+                    engine = QgsGeometry.createGeometryEngine(g.constGet())
+                    engine.prepareGeometry()
+                if engine.contains(cpt.constGet()):
+                    want.add(cid)
+        self._progress_end()
         if want != current:
             self._expanding_selection = True
             try:
@@ -1408,13 +1553,15 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             return
         parts = ['<table style="border-collapse:collapse;width:100%;">',
                  self._info_title_row(title)]
-        for col in range(table.columnCount()):
-            header_item = table.horizontalHeaderItem(col)
-            item = table.item(row, col)
-            if header_item is None or item is None:
+        # 表のモデルから読む（QTableWidget の表も、モデルとビューを分けた表も同じように扱える）
+        model = table.model()
+        for col in range(model.columnCount(QModelIndex())):
+            header = model.headerData(col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+            value = model.index(row, col).data(Qt.ItemDataRole.DisplayRole)
+            if header is None or value is None:
                 continue
-            label = header_item.text().strip()
-            val = item.text().strip()
+            label = str(header).strip()
+            val = str(value).strip()
             if not label or val == '':
                 continue
             parts.append(
