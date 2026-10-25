@@ -680,7 +680,9 @@ class OpendataMixin:
         v.addWidget(self.stack_od, 1)
 
         bottom = QHBoxLayout()
-        self.lbl_od_status = QLabel('「一覧を更新」を押してください')
+        # 長い状態表示は省略し、パネルを横に広げない（全文はツールチップ）
+        from .dock_widget import _ElidedLabel
+        self.lbl_od_status = _ElidedLabel('「一覧を更新」を押してください')
         self.lbl_od_status.setStyleSheet('font-size: 10px;')  # 通常の文字色（ダークテーマでも読める）
         bottom.addWidget(self.lbl_od_status, 1)
         # 選んだ小班の範囲の統計を求めている間だけ出す（終わったら隠す）
