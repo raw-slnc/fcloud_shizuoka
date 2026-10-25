@@ -9,7 +9,7 @@ import urllib.parse
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QTabWidget, QTextBrowser,
-    QPushButton, QFrame, QMessageBox, QCheckBox, QApplication,
+    QPushButton, QFrame, QMessageBox, QCheckBox, QApplication, QSizePolicy,
 )
 from qgis.PyQt.QtCore import (
     Qt, QUrl, QByteArray, QSettings, QTimer, pyqtSignal, QObject, QEvent, QModelIndex,
@@ -43,6 +43,37 @@ from .tab_shinrinbo import ShinrinboMixin
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
 _HL_SEL_FILL   = QColor(210,  30,  30,  25)
+
+
+class _ElidedLabel(QLabel):
+    """長い文字を末尾「…」で省略して出すラベル。文字の長さで幅を要求しないので、
+    長い状態表示が出てもパネルを横に広げない。省略したときは、全文をツールチップで読める。"""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(parent)
+        self._full_text = ''
+        policy = self.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Ignored)
+        self.setSizePolicy(policy)
+        self.setMinimumWidth(0)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = text or ''
+        self._elide()
+
+    def text(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        self.ensurePolished()  # スタイルシートの文字の大きさを反映してから幅を測る
+        shown = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(0, self.width()))
+        super().setText(shown)
+        self.setToolTip(self._full_text if shown != self._full_text else '')
 
 
 class _TableInputFilter(QObject):
@@ -439,10 +470,13 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
         # 画面の処理の中で時間がかかる処理（大量の小班を選んだときの森林簿の表など）の間だけ出す
         # 進み具合は文字で出す（例：森林簿の表を作成中… 45%（146,920 小班））
-        self.lbl_progress = QLabel()
+        self.lbl_progress = _ElidedLabel()  # 長いときは省略し、パネルを横に広げない
         self.lbl_progress.setStyleSheet('font-size: 10px;')  # 通常の文字色（ダークテーマでも読める）
         self.lbl_progress.setVisible(False)
-        bottom_row.addWidget(self.lbl_progress)
+        # 幅を要求しないラベルなので、伸びる指定にしないと余白に幅を取られて見えなくなる。
+        # 文字は右寄せ（「データについて」の左に寄せる）
+        self.lbl_progress.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bottom_row.addWidget(self.lbl_progress, 1)
         bottom_row.addSpacing(8)
 
         btn_data_info = QPushButton('データについて')
