@@ -14,7 +14,7 @@ import re
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QMessageBox,
-    QStackedWidget, QTextBrowser, QCheckBox, QSpinBox,
+    QStackedWidget, QTextBrowser, QCheckBox, QSpinBox, QDialog,
 )
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import (
@@ -30,6 +30,7 @@ from qgis.gui import (
     QgsAttributeTableView, QgsAttributeTableModel, QgsAttributeTableFilterModel,
 )
 
+from . import si_export
 from .constants import (
     _FCDS_API_PACKAGE_SHOW, _FCDS_DATASETS, _FCDS_KEIKU_CODE, _FCDS_SHARED_SUBDIR,
     _FCDS_SELECTION_RGBA, _FCDS_SPECIES_COLORS, _FCDS_SPECIES_NORM, _FCDS_SPECIES_RULES,
@@ -718,6 +719,13 @@ class OpendataMixin:
         src = QLabel('オープンデータ（G空間情報センター）')
         src.setStyleSheet('color: gray; font-size: 10px;')
         bottom.addWidget(src, 0, Qt.AlignmentFlag.AlignRight)
+        # 表示中のメッシュから地位指数マップを書き出す（Morizon Next などの「地位指数マップ」に使う）
+        self.btn_od_si = QPushButton('地位指数マップ')
+        self.btn_od_si.setToolTip('表示中のメッシュ（スギ・ヒノキ）の樹高と、小班の林齢から、地位指数を求めて GeoTIFF に書き出す')
+        self.btn_od_si.setEnabled(False)
+        self.btn_od_si.clicked.connect(self._od_export_site_index)
+        bottom.addWidget(self.btn_od_si)
+        self._od_si_worker = None
         v.addLayout(bottom)
 
         self.btn_od_catalog.clicked.connect(self._od_fetch_catalog)
@@ -1095,6 +1103,7 @@ class OpendataMixin:
         busy = bool(self._od_current_job)
         self.btn_od_catalog.setEnabled(not self._od_catalog_pending and not busy)
         self.btn_od_fetch_show.setEnabled(self._od_current_entry() is not None and not busy)
+        self._od_update_si_button()
         for c in (self.combo_od_keiku, self.combo_od_type, self.combo_od_no):
             c.setEnabled(bool(self._od_catalog) and not busy)
 
@@ -1344,6 +1353,23 @@ class OpendataMixin:
             if not worker.isRunning():
                 _OD_ORPHANED_WORKERS.discard(worker)
             self._od_worker = None
+        si_worker = self._od_si_worker
+        if si_worker is not None:
+            # 地位指数マップの書き出しも、破棄済み画面へシグナルを送らないよう同じように切り離す
+            si_worker.cancel()
+            for signal in (si_worker.progress, si_worker.finished_ok, si_worker.failed, si_worker.finished):
+                try:
+                    signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            _OD_ORPHANED_WORKERS.add(si_worker)
+            si_worker.finished.connect(
+                lambda w=si_worker: _OD_ORPHANED_WORKERS.discard(w))
+            if si_worker.isRunning():
+                si_worker.wait(3000)
+            if not si_worker.isRunning():
+                _OD_ORPHANED_WORKERS.discard(si_worker)
+            self._od_si_worker = None
 
     # ------------------------------------------------------------------
     # 表示（常に1つ）
@@ -1432,7 +1458,99 @@ class OpendataMixin:
             else f'{label}を表示できませんでした', warn=not shown)
         self._od_render_left()
         self._od_update_bottom_ts()
+        self._od_update_si_button()
         self._refresh_map_canvas()
+
+    # ------------------------------------------------------------------
+    # 地位指数マップの書き出し（si_export）
+    # ------------------------------------------------------------------
+
+    def _od_si_source(self):
+        """表示中のデータが地位指数を求められるメッシュなら、その情報の辞書。できなければ (None, 理由)"""
+        if not self._od_shown:
+            return None, 'メッシュを表示すると使えます'
+        key, t = self._od_shown
+        info = self._od_layer_shape(key, t) if t in _SHAPE_FOLDERS else None
+        if not info or info.get('shape') != 'grid':
+            return None, 'メッシュ（10m・20m 四方）のデータを表示すると使えます'
+        rec = self._od_load_index().get(key) or {}
+        layer = self._od_shown_layer()
+        if layer is None or not rec.get('gpkg'):
+            return None, 'メッシュを表示し直してください'
+        names = layer.fields().names()
+        hcol = si_export.height_column(names)
+        if '樹種_統一' not in names or hcol is None:
+            return None, 'このメッシュには樹種または樹高の列が無いため使えません'
+        return {
+            'mesh_gpkg': os.path.join(self._od_shared_dir(), rec['gpkg']),
+            'mesh_layer': _ZIP_LAYERS[t][3], 'mesh_name': layer.name(), 'cell': info.get('cell') or 20,
+            'height_column': hcol, 'key': key,
+            # 古い ZIP は森林計測年の列が空。データの計測年度（R○）で補う
+            'fallback_measure_year': si_export.reiwa_year(key.rsplit('_', 2)[-2] if key.count('_') >= 2 else ''),
+        }, ''
+
+    def _od_update_si_button(self):
+        button = getattr(self, 'btn_od_si', None)
+        if button is None or sip.isdeleted(button):
+            return
+        source, reason = self._od_si_source()
+        running = self._od_si_worker is not None
+        button.setEnabled(source is not None and not running)
+        button.setToolTip(
+            '地位指数マップを書き出しています' if running else
+            '表示中のメッシュ（スギ・ヒノキ）の樹高と、小班の林齢から、地位指数を求めて GeoTIFF に書き出す'
+            + ('' if source else f'\n（{reason}）'))
+
+    def _od_export_site_index(self):
+        source, reason = self._od_si_source()
+        if source is None:
+            QMessageBox.information(self, '地位指数マップ', reason)
+            return
+        out_dir = os.path.join(QgsProject.instance().absolutePath(), 'fcapital_data_shizuoka', 'site_index')
+        dialog = si_export.SiteIndexDialog(self, source['mesh_name'],
+                                           os.path.join(out_dir, f"{source['key']}_地位指数.tif"))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        job = dict(source, **dialog.job)
+        worker = si_export.SiteIndexWorker(job)
+        worker.progress.connect(lambda pct: (self.bar_od_progress.setVisible(True), self.bar_od_progress.setValue(pct)))
+        worker.finished_ok.connect(self._od_si_done)
+        worker.failed.connect(self._od_si_failed)
+        worker.finished.connect(self._od_si_finished)
+        self._od_si_worker = worker
+        self._od_update_si_button()
+        self._od_set_status('地位指数マップを書き出しています…')
+        worker.start()
+
+    def _od_si_finished(self):
+        self._od_si_worker = None
+        if not getattr(self, '_od_shutting_down', False):
+            self.bar_od_progress.setVisible(False)
+            self._od_update_si_button()
+
+    def _od_si_done(self, path, counts):
+        target = counts.get('target', 0)
+        lines = [
+            f"書き出しました：{path}",
+            '',
+            f"スギ・ヒノキのマス：{target:,}",
+            f"地位指数を求めたマス：{counts.get('written', 0):,}",
+            f"値なし（林齢なし）：{counts.get('no_age', 0):,}",
+            f"値なし（計測時の林齢 {si_export.MIN_AGE} 年未満）：{counts.get('young', 0):,}",
+            f"値なし（樹高と林齢が合わない）：{counts.get('mismatch', 0):,}",
+        ]
+        if 'register_other' in counts:
+            lines += ['', f"地位指数を求めたマスのうち、森林簿の樹種がスギ・ヒノキでない小班：{counts['register_other']:,}",
+                      '（樹種はメッシュの判定を優先し、計算からは外していません。樹種の調査が必要な場所の目安です）']
+        measure_max = counts.get('measure_max')
+        if measure_max and datetime.date.today().year - measure_max >= si_export.OLD_MEASURE_YEARS:
+            lines += ['', f'森林計測年が {measure_max} 年と古いデータです。今の地位の判断に使うときは注意してください。']
+        self._od_set_status(f'地位指数マップを書き出しました：{os.path.basename(path)}')
+        QMessageBox.information(self, '地位指数マップ', '\n'.join(lines))
+
+    def _od_si_failed(self, message):
+        self._od_set_status('地位指数マップを書き出せませんでした', warn=True)
+        QMessageBox.warning(self, '地位指数マップ', f'地位指数マップを書き出せませんでした。\n\n{message}')
 
     def _od_style_layer(self, lyr, t):
         """解析元（下田市・南伊豆町・松崎町）のレイヤーから書き出したスタイルを当て、
