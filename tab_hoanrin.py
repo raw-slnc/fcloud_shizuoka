@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import collections
+import time
 
 import sip
 
@@ -116,7 +117,10 @@ class HoanrinMixin:
         v.addWidget(self.tbl_hoanrin, 1)
 
         bottom_row = QHBoxLayout()
-        self.lbl_hoanrin_count = QLabel('')
+        # 件数と、検索の進み具合（取得中の量・残り時間、読み込み・照合の段階）を出す。
+        # 長い文字は省略し、パネルを横に広げない
+        from .dock_widget import _ElidedLabel
+        self.lbl_hoanrin_count = _ElidedLabel('')
         self.lbl_hoanrin_count.setStyleSheet('color: gray; font-size: 10px;')
         bottom_row.addWidget(self.lbl_hoanrin_count, 1)
         self.chk_hoanrin_city_in_layer = QCheckBox('計画図情報で絞込')
@@ -393,16 +397,66 @@ class HoanrinMixin:
                 self._filter_and_display_hoanrin()
                 return
 
+        # 直前に受け取った同じ市町のデータがあれば、取り直さずに使う（種別・大字・字・地番を変えて
+        # 検索し直すたびに県全体を受け取らないように）。ローカル保存はせず、QGIS を開いている間だけ持つ
+        mem = getattr(self, '_hoanrin_mem', None)
+        if mem is not None and mem[0] == city:
+            self._current_raw_hoanrin = mem[1]
+            self.lbl_cache_ts.setText('取得日時: 未保存')
+            self._filter_and_display_hoanrin()
+            return
+
         self.btn_hoanrin_search.setEnabled(False)
+        self._hoanrin_start_progress()
         self._post_api(
             f'{_API_BASE}/advanced-search/保安林検索',
             {},
             lambda data, city=city: self._on_hoanrin_result(data, city),
+            progress=self._on_hoanrin_download_progress,
+            received=self._on_hoanrin_received,
         )
+
+    # ------------------------------------------------------------------
+    # 検索の進み具合（保安林台帳は県全体を1回で受け取るので、受け取った量で示す）
+    # ------------------------------------------------------------------
+
+    def _hoanrin_start_progress(self):
+        self._hoanrin_dl_start = time.monotonic()
+        self._hoanrin_dl_last = 0.0
+        self._hoanrin_show_progress('保安林台帳を取得中…')
+
+    def _hoanrin_show_progress(self, text):
+        self.lbl_hoanrin_count.setText(text)
+        self._progress_repaint()
+
+    def _on_hoanrin_download_progress(self, received, total):
+        """受け取りの進み具合。全体の量がわかれば ％ と残り時間の目安、わからなければ受け取った量だけ。"""
+        now = time.monotonic()
+        if now - self._hoanrin_dl_last < 0.3 and received != total:
+            return  # 細かく届くので、描き直しは0.3秒ごとにする
+        self._hoanrin_dl_last = now
+        elapsed = now - self._hoanrin_dl_start
+        mb = received / 1e6
+        if total and total > 0:
+            pct = int(received * 100 / total)
+            text = f'保安林台帳を取得中… {pct}%（{mb:.1f} / {total / 1e6:.1f} MB）'
+            if 0 < received < total and elapsed > 1:
+                remain = (total - received) / (received / elapsed)
+                text += f' 残り約{int(remain) + 1}秒'
+        else:
+            text = f'保安林台帳を取得中… {mb:.1f} MB 受信'
+        self.lbl_hoanrin_count.setText(text)
+
+    def _on_hoanrin_received(self):
+        self._hoanrin_show_progress('受け取ったデータを読み込み中…')
 
     def _on_hoanrin_result(self, data, city=None):
         self.btn_hoanrin_search.setEnabled(True)
+        if data is not None:
+            self._hoanrin_show_progress('市町村で絞り込み中…')
         self._current_raw_hoanrin = self._filter_hoanrin_data_by_city(data, city)
+        # 次に同じ市町で検索し直すときに使う（受け取れなかったときは持たない）
+        self._hoanrin_mem = (city, self._current_raw_hoanrin) if data is not None else None
         self.lbl_cache_ts.setText('取得日時: 未保存')
         self._filter_and_display_hoanrin()
         self._update_cache_btn_states()
@@ -425,10 +479,13 @@ class HoanrinMixin:
         self.btn_cache_update.setEnabled(False)
         self.btn_hoanrin_search.setEnabled(False)
         self.lbl_cache_ts.setText(f'取得日時: 更新中...（{len(cities)}市町村）')
+        self._hoanrin_start_progress()
         self._post_api(
             f'{_API_BASE}/advanced-search/保安林検索',
             {},
             lambda data, cities=cities, gen=gen: self._on_hoanrin_scope_update_result(cities, data, gen),
+            progress=self._on_hoanrin_download_progress,
+            received=self._on_hoanrin_received,
         )
 
     def _on_hoanrin_scope_update_result(self, cities, data, gen):
@@ -442,6 +499,8 @@ class HoanrinMixin:
                     self._hoanrin_update_failed += 1
 
         self.btn_hoanrin_search.setEnabled(True)
+        # 進み具合の文字を消す（表を出し直すときは、件数に置き換わる）
+        self.lbl_hoanrin_count.setText('')
         current_city = self.combo_hoanrin_city.currentText().strip()
         db = self._get_db('保安林台帳')
         if db is not None and current_city:
@@ -568,6 +627,7 @@ class HoanrinMixin:
                     want.add(self._strip_ward_prefix(d))
             want.discard('')
             if want:
+                self._hoanrin_show_progress('計画図と照合中…')
                 quoted = ','.join(
                     "'" + d.replace("'", "''") + "'" for d in want)
                 req = QgsFeatureRequest().setFilterExpression(

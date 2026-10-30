@@ -2,12 +2,13 @@
 name=Fcloud Shizuoka
 qgisMinimumVersion=3.14
 description=Shizuoka Prefecture Forest Cloud information viewer. Links forest planning map (GeoPackage) with the Shizuoka Forest Cloud API to display forest register details, protective forest records, and project data.
-version=0.2.4
+version=0.2.5
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
 about=Displays forest information from the Shizuoka Prefecture Forest Cloud public system, linked to GeoPackage data created by Shinrinbo Code Converter. Provides a dock panel for browsing forest stand attributes, protective forest records, and forest management data. This plugin is specific to Shizuoka Prefecture. Requires a .gpkg or .shp layer containing a KEY1 field loaded in the QGIS project. The displayed information (protective forest ledger, Mori no Chikara reforestation project, forest management plans, forest land development, etc.) is sourced from open data published by Shizuoka Prefecture and the Shizuoka Prefecture Forest Cloud, retrieved, processed, and formatted for easy reference in QGIS. / Support: https://paypal.me/rawslnc
 about[ja]=静岡県森林クラウドの公開システムと連携し、Shinrinbo Code Converter で作成した GeoPackage データに基づいて林地情報を表示します。林小班属性・保安林記録・経営計画作成箇所をドックパネルで閲覧できます。本プラグインは静岡県専用です。KEY1 フィールドを持つ .gpkg または .shp レイヤーが QGIS プロジェクトに読み込まれている必要があります。表示する保安林台帳・森の力再生事業・経営計画・林地開発などの情報は、静岡県が公開するオープンデータおよび静岡県森林クラウドの公開データをもとに、QGIS 上で参照しやすいよう取得・加工・編集して表示しています。 / Support: https://paypal.me/rawslnc
 changelog=
+    0.2.5 - Searching the 保安林台帳 tab now shows its progress: the amount of data received (with a percentage and an estimated remaining time when the total size is known) and the current processing step. Searching again in the same municipality (for example after changing 種別, 大字, 字 or 地番) now uses the data already received instead of downloading it again.
     0.2.4 - Fixed long status messages widening the panel. Long messages are now shortened with …, and the full text is shown when you hover over them.
     0.2.3 - [IMPORTANT] Selecting a large number of 小班 (for example with Ctrl+A on the forest planning map, or Ctrl+A in the 森林簿 table) no longer freezes QGIS. The 森林簿 table now appears immediately even for large selections and reads rows as you scroll, and each column has a fixed width so values no longer wrap onto two lines. 小班 overlapping at the same location (records that differ only in 整理番号, or 小班 of a neighboring municipality overlapping at a boundary) are now added to the selection however the 小班 were selected, so no 森林簿 record at that location is missed. A progress message is shown while a large selection is being processed.
     0.2.2 -Added items to the information displayed in the 選択中の小班 tab. The クラウド情報 tab now shows its title inside the frame, matching the 選択中の小班 tab. The panel window now shows the plugin icon when floated.
