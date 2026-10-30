@@ -546,7 +546,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         menu.addAction('選択列をコピー', lambda: _copy_table_selection(table))
         menu.exec(table.viewport().mapToGlobal(pos))
 
-    def _post_api(self, url, params, callback):
+    def _post_api(self, url, params, callback, progress=None, received=None):
+        """progress(受け取った量, 全体の量)：受け取りの進み具合（全体の量が不明なら -1 などの0以下）。
+        received()：受け取り終わって、データを読み込む前に呼ぶ（読み込みに時間がかかるときの表示用）。"""
         body = QByteArray(urllib.parse.urlencode(params).encode('utf-8'))
         req = QNetworkRequest(QUrl(url))
         req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader,
@@ -558,7 +560,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             b'https://fcloud.pref.shizuoka.jp/fgis/?version=1.26.0220.a')
         reply = QgsNetworkAccessManager.instance().post(req, body)
         self._pending_replies.append(reply)
-        reply.finished.connect(lambda: self._handle_reply(reply, callback))
+        if progress is not None:
+            reply.downloadProgress.connect(progress)
+        reply.finished.connect(lambda: self._handle_reply(reply, callback, received))
 
     def _get_binary(self, url, callback):
         req = QNetworkRequest(QUrl(url))
@@ -626,9 +630,11 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         parts.append('</table>')
         self.info_browser.setHtml(''.join(parts))
 
-    def _handle_reply(self, reply, callback):
+    def _handle_reply(self, reply, callback, received=None):
         data = None
         if reply.error() == QNetworkReply.NetworkError.NoError:
+            if received is not None:
+                received()
             try:
                 data = json.loads(bytes(reply.readAll()).decode('utf-8'))
             except Exception as e:
