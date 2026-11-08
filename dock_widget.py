@@ -39,6 +39,7 @@ from .tab_keikaku   import KeikakuMixin
 from .tab_rinchi    import RinchiMixin
 from .tab_shinrinbo import ShinrinboMixin
 from .tab_opendata  import OpendataMixin
+from .tab_seibi     import SeibiMixin
 
 # 複数タブで共有する選択ハイライト色
 _HL_SEL_BORDER = QColor(210,  30,  30, 220)
@@ -190,7 +191,8 @@ class FcloudDock(QDockWidget):
         super().closeEvent(event)
 
 
-class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, OpendataMixin, QWidget):
+class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, ShinrinboMixin, OpendataMixin, SeibiMixin,
+                   QWidget):
     _TAB_ORDER_VERSION = 2
 
     def __init__(self, iface, highlights=None, parent=None):
@@ -494,16 +496,6 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'manual.html')
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def _build_tab_seibi(self):
-        from qgis.PyQt.QtWidgets import QWidget, QVBoxLayout, QLabel
-        w = QWidget()
-        v = QVBoxLayout(w)
-        lbl = QLabel('森林クラウド側未実装')
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet('color: gray; font-size: 13px; padding: 20px;')
-        v.addWidget(lbl)
-        return w
-
     # ------------------------------------------------------------------
     # 共通ユーティリティ
     # ------------------------------------------------------------------
@@ -700,18 +692,20 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
 
     def _cleanup_plugin_layers(self):
         self._od_remove_display()
+        self._seibi_remove_integrated_layer()
         self._remove_mori_vector_layer()
         self._remove_keikaku_vector_layer()
         self._remove_rinchi_layers()
         self._toggle_mvt_layer('', 'fcloud_林道', False)
-        for btn in (self.btn_mori_layer, self.btn_keikaku_layer, self.btn_rinchi_layer, self.btn_rindo):
+        for btn in (self.btn_seibi_layer, self.btn_mori_layer, self.btn_keikaku_layer,
+                    self.btn_rinchi_layer, self.btn_rindo):
             btn.blockSignals(True)
             btn.setChecked(False)
             btn.blockSignals(False)
         QSettings().setValue('fcloud_shizuoka/mori_layer_on', False)
         QSettings().setValue('fcloud_shizuoka/keikaku_layer_on', False)
         self._remove_layers_by_name(
-            'fcloud_林道', 'fcloud_森の力実施箇所',
+            'fcloud_林道', 'fcloud_整備事業_統合', 'fcloud_森の力実施箇所',
             'fcloud_経営計画作成箇所', '林地開発_許可', '林地開発_連絡調整',
         )
         self._refresh_map_canvas()
@@ -833,6 +827,8 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self._od_on_tab_hidden()  # 左パネルを「クラウド情報」に戻す
         if prev == 0 and index != 0:
             self._clear_selection_highlights()
+        elif prev == 2 and index != 2:
+            self._seibi_on_tab_hidden()
         elif prev == 3 and index != 3:
             self._clear_mori_markers()
             needs_refresh = self._set_layer_visible(self._mori_vector_layer_id, False) or needs_refresh
@@ -873,6 +869,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.lbl_cache_ts.setText(
                 self._hoanrin_cache_status_text(self._hoanrin_scope_cities())
             )
+        elif index == 2:
+            # 整備事業: 下部には検索軽量化リストの作成日と件数を出す（リストの更新はタブ内のボタン）
+            self._seibi_on_tab_shown()
         elif index == 3:
             city = self.combo_hoanrin_city.currentText().strip()
             norin = _CITY_TO_NORIN.get(city, '')
@@ -950,7 +949,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(not no_data)
         elif tab in (2, 6):
-            # 整備事業: 未実装 ／ 森林資源情報: 取得・保存はタブ内の「取得」で行う
+            # 整備事業: リストの更新はタブ内の「リストを更新」 ／ 森林資源情報: 取得・保存はタブ内の「取得」で行う
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
         elif tab == 0:
@@ -1136,6 +1135,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 self._apply_hoanrin_city_filter(layer)
                 self._apply_rinchi_city_filter(layer)
         self._update_keikaku_load_btn()
+        self._seibi_on_layer_changed()
 
     # ------------------------------------------------------------------
     # 連携レイヤーの選択ハイライト（塗り35%に変更・復元）
@@ -1783,6 +1783,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
     def cleanup_on_unload(self):
         self._stop_privacy_guard()
         self._od_cancel_all()
+        self._seibi_cancel_all()
         try:
             QgsProject.instance().readProject.disconnect(self._on_project_read)
         except (TypeError, RuntimeError):

@@ -8,7 +8,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton,
 )
-from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtCore import Qt, QSettings, QObject, QEvent
 from qgis.PyQt.QtGui import QColor, QBrush
 from qgis.core import (
     QgsProject, QgsFeatureRequest,
@@ -30,6 +30,21 @@ _HL_RED_BORDER    = QColor(220,  50,  50, 200)
 _HL_RED_FILL      = QColor(220,  50,  50,   8)
 _HL_ORANGE_BORDER = QColor(255, 140,   0, 200)
 _HL_ORANGE_FILL   = QColor(255, 140,   0,   8)
+
+class _KozuCloseFilter(QObject):
+    """Kozu XML Integrator の窓が閉じられたら知らせる。Kozu の窓は閉じても隠れるだけで残るため
+    （3.x 版・4.x 版とも）、閉じる操作（Close の知らせ）を見て公図連携をオフにする。
+    最小化は Close ではないので、オフにしない。Kozu の内部の処理には頼らない。"""
+
+    def __init__(self, on_close, parent=None):
+        super().__init__(parent)
+        self._on_close = on_close
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Close:
+            self._on_close()
+        return False  # 閉じる処理そのものは Kozu に任せる
+
 
 # テーブル「一致データの有無」列の文字色
 _MATCH_BRUSH = {
@@ -905,24 +920,102 @@ class HoanrinMixin:
     # 公図連携
     # ------------------------------------------------------------------
 
+    _KOZU_NAME = 'kozu_xml_integrator'
+
+    @classmethod
+    def _kozu_state(cls):
+        """Kozu XML Integrator の状態：'loaded'（読み込み済み）／'disabled'（入っているが有効になっていない）／
+        'missing'（入っていない）。"""
+        import qgis.utils
+        if cls._KOZU_NAME in qgis.utils.plugins:
+            return 'loaded'
+        if cls._KOZU_NAME in getattr(qgis.utils, 'available_plugins', []):
+            return 'disabled'
+        return 'missing'
+
     def _update_kozu_btn(self, btn=None):
-        from qgis.utils import plugins as _qplugins
+        """入っていないときは灰色。入っていれば押せる（有効でなければ、押したときに知らせる）。
+        連携中に Kozu が読み込まれていない状態になったら、オフにしてメッセージバーで知らせる。"""
         btn = btn or self.btn_kozu
-        installed = 'kozu_xml_integrator' in _qplugins
-        btn.setEnabled(installed)
-        if not installed:
-            btn.setChecked(False)
-        else:
-            btn.setText('公図連携ON' if btn.isChecked() else '公図連携OFF')
+        if btn.property('kozu_tip') is None:
+            btn.setProperty('kozu_tip', btn.toolTip())  # 元の説明を覚えておく
+        state = self._kozu_state()
+        btn.setEnabled(state != 'missing')
+        btn.setToolTip('Kozu XML Integrator がインストールされていません' if state == 'missing'
+                       else btn.property('kozu_tip'))
+        if state != 'loaded' and btn.isChecked():
+            btn.setChecked(False)  # toggled → _on_kozu_toggled(False)
+            if state == 'disabled':
+                self.iface.messageBar().pushInfo(
+                    '公図連携', 'Kozu XML Integrator が読み込まれていないため、公図連携をオフにしました。')
+        btn.setText('公図連携ON' if btn.isChecked() else '公図連携OFF')
 
     def _on_kozu_toggled(self, checked, btn=None):
         btn = btn or self.btn_kozu
         btn.setText('公図連携ON' if checked else '公図連携OFF')
         if checked:
+            if self._kozu_state() != 'loaded':
+                # 入っているが有効になっていない（入っていないときはボタンが灰色で押せない）
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+                btn.setText('公図連携OFF')
+                from qgis.PyQt.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, '公図連携',
+                    'Kozu XML Integrator が有効になっていません。\n\n'
+                    'プラグイン → プラグインの管理とインストール の「インストール済み」で、'
+                    'Kozu XML Integrator にチェックを入れてから、もう一度「公図連携」を ON にしてください。')
+                return
+            self._show_kozu_notice_once()
             from qgis.utils import plugins as _qplugins
-            kozu = _qplugins.get('kozu_xml_integrator')
+            kozu = _qplugins.get(self._KOZU_NAME)
             if kozu:
                 kozu.run()
+                self._watch_kozu_close(getattr(kozu, 'main_window', None))
+
+    def _watch_kozu_close(self, win):
+        """Kozu の窓に、閉じられたら公図連携をオフにする見張りを付ける（窓ごとに一度だけ）。"""
+        if win is None or sip.isdeleted(win):
+            return
+        if getattr(self, '_kozu_watched_win', None) is win:
+            return
+        old = getattr(self, '_kozu_close_filter', None)
+        old_win = getattr(self, '_kozu_watched_win', None)
+        if old is not None and old_win is not None and not sip.isdeleted(old_win) and not sip.isdeleted(old):
+            old_win.removeEventFilter(old)
+        self._kozu_close_filter = _KozuCloseFilter(self._on_kozu_window_closed, self)
+        win.installEventFilter(self._kozu_close_filter)
+        self._kozu_watched_win = win
+
+    def _on_kozu_window_closed(self):
+        """Kozu の窓が閉じられた：保安林台帳・森林簿の公図連携ボタンをどちらもオフにする。"""
+        for name in ('btn_kozu', 'btn_kozu_shinrinbo'):
+            btn = getattr(self, name, None)
+            if btn is not None and not sip.isdeleted(btn) and btn.isChecked():
+                btn.setChecked(False)  # toggled → _on_kozu_toggled(False) で表示も「公図連携OFF」になる
+
+    _KOZU_NOTICE_KEY = 'fcloud_shizuoka/kozu_notice_hidden'
+
+    def _show_kozu_notice_once(self):
+        """公図連携を ON にしたとき、大字の分け方の違いについての注意を出す（「次回から表示しない」で出さない）。"""
+        if QSettings().value(self._KOZU_NOTICE_KEY, False, type=bool):
+            return
+        from qgis.PyQt.QtWidgets import QMessageBox, QCheckBox
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle('公図連携')
+        box.setText(
+            '公図連携では、選んだ小班の大字と地番を Kozu XML Integrator に送り、公図を探します。\n\n'
+            '・計画図と公図で、大字の分け方が違う地域があります（例：西伊豆町の「大沢里」は、公図では'
+            '「大沢里白川」「大沢里祢宜畑」に分かれています）。\n\n'
+            '・このときは地番から公図の大字を決めます。同じ地番が複数の大字にあって決められないときは、検索しません。'
+            'Kozu XML Integrator で大字を選んでから、地番を検索してください。')
+        chk = QCheckBox('次回から表示しない')
+        box.setCheckBox(chk)
+        box.exec()
+        if chk.isChecked():
+            QSettings().setValue(self._KOZU_NOTICE_KEY, True)
 
     @staticmethod
     def _norm_muni(name):
@@ -1007,13 +1100,98 @@ class HoanrinMixin:
                        f'（同名大字は {"・".join(munis)} の分のみ）。'), None, None
 
     @staticmethod
+    def _kozu_chiban_key(text):
+        """地番を (親番, 枝番) にする（「123-4」「123の4」「123番4」→('123', '4')、枝番なしは ''）。
+        Kozu の内部の関数には頼らず、fcloud と Kozu の地番を同じ決まりで比べる。"""
+        import re
+        nums = re.findall(r'\d+', str(text or '').translate(str.maketrans('０１２３４５６７８９', '0123456789')))
+        if not nums:
+            return None
+        return nums[0].lstrip('0') or '0', (nums[1].lstrip('0') or '0') if len(nums) > 1 else ''
+
+    def _plan_oaza_names(self):
+        """接続中の計画図レイヤーにある大字名（大字名称の値）。レイヤーごとに一度だけ読んで覚える。"""
+        layer = getattr(self, '_connected_layer', None)
+        if layer is None or sip.isdeleted(layer):
+            return set()
+        cache = getattr(self, '_plan_oaza_cache', None)
+        if cache is not None and cache[0] == layer.id():
+            return cache[1]
+        idx = layer.fields().indexOf('大字名称')
+        names = set()
+        if idx >= 0:
+            names = {str(v).strip() for v in layer.uniqueValues(idx)
+                     if v is not None and str(v).strip() not in ('', 'NULL')}
+        self._plan_oaza_cache = (layer.id(), names)
+        return names
+
+    def _kozu_resolve_oaza(self, kozu, city, daiji, chiban):
+        """大字名が公図（Kozu の DB）と完全一致しないとき、同じ市町の公図の大字のうち、名前の前の方が
+        一致するもの（どちらかがもう一方で始まる）を候補にし、地番があるもので絞る。
+        戻り値：('resolved', 公図の大字名) ／ ('ambiguous', (候補の一覧, 地番が複数にあったか)) ／ ('none', None)。
+        Kozu の版（市町村見出しの有無）には関わらず、DB の t_fude_poly・t_xml_meta だけを読む。"""
+        win = getattr(kozu, 'main_window', None)
+        db = getattr(win, 'db', None) if win is not None else None
+        if db is None or not daiji:
+            return 'none', None
+        try:
+            with db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT f.oaza_name, m.id, m.municipality_name "
+                    "FROM t_xml_meta m JOIN t_fude_poly f ON f.xml_meta_id = m.id "
+                    "WHERE f.oaza_name != '' AND f.oaza_name != ? "
+                    "AND (instr(f.oaza_name, ?) = 1 OR instr(?, f.oaza_name) = 1)",
+                    (daiji, daiji, daiji)).fetchall()
+                tgt = self._norm_muni(city)
+                # 計画図に大字としてあるものは、別の大字なので候補にしない（例：「大平」に対する「大平柿木」。
+                # Kozu の DB に「大平」の公図を入れていないとき、別の大字で検索してしまわないように）
+                plan_oaza = self._plan_oaza_names()
+                ids_of = {}
+                for oaza, mid, muni in rows:
+                    nm = self._norm_muni((muni or '').strip())
+                    if tgt and nm and not (nm == tgt or nm.startswith(tgt) or tgt.startswith(nm)):
+                        continue  # 別の市町の同名の大字は候補にしない
+                    if oaza in plan_oaza:
+                        continue
+                    ids_of.setdefault(oaza, set()).add(mid)
+                cands = sorted(ids_of)
+                if not cands:
+                    return 'none', None
+                want = self._kozu_chiban_key(chiban)
+                with_chiban = []
+                if want is not None:
+                    for oaza in cands:
+                        ids = sorted(ids_of[oaza])
+                        marks = ','.join('?' * len(ids))
+                        # SQL に入るのは ? の数だけ（値はすべて ? で渡す）
+                        cond = 'oaza_name = ? AND instr(chiban, ?) > 0 AND xml_meta_id IN (' + marks + ')'
+                        sql = 'SELECT chiban FROM t_fude_poly WHERE ' + cond  # nosec B608
+                        cur = conn.execute(sql, [oaza, want[0]] + ids)
+                        for (ch,) in cur:
+                            got = self._kozu_chiban_key(ch)
+                            if got and got[0] == want[0] and (not want[1] or got[1] == want[1]):
+                                with_chiban.append(oaza)
+                                break
+        except Exception as e:  # noqa: BLE001 - DB を読めなければ候補なし（今までどおりの知らせ）
+            print(f'[fcloud] 公図連携: 大字の候補を探せません: {e}')
+            return 'none', None
+        if len(with_chiban) == 1:
+            return 'resolved', with_chiban[0]
+        if len(with_chiban) > 1:
+            return 'ambiguous', (with_chiban, True)
+        if len(cands) == 1:
+            return 'resolved', cands[0]  # 地番は見つからないが候補は1つ（Kozu の検索で見つからないと出る）
+        return 'ambiguous', (cands, False)
+
+    @staticmethod
     def _select_kozu_oaza(win, daiji, keep_munis):
         """Kozu 側 comboOaza を選択する。
 
         市町村見出し導入後、表示テキストは「見出し行のインデント＋大字名」になり
         setCurrentText では一致しなくなったため、itemData（UserRole=大字名、
         UserRole+1=市町村生表記）で照合する。keep_munis が None のときは市町村での
-        絞り込みができない（市町村不明／判定不能）ため大字名のみで一致させる。"""
+        絞り込みができない（市町村不明／判定不能）ため大字名のみで一致させる。
+        data で見つからないときは、表示の文字で選ぶ（市町村見出しの無い古い Kozu＝3.x 版向け）。"""
         combo = getattr(win, 'comboOaza', None)
         if combo is None:
             return
@@ -1029,6 +1207,11 @@ class HoanrinMixin:
                 return
         if fallback >= 0:
             combo.setCurrentIndex(fallback)
+            return
+        # 市町村見出しの無い古い Kozu（3.x 版。項目に大字名の data を持たない）では、表示の文字で選ぶ
+        i = combo.findText(daiji)
+        if i >= 0:
+            combo.setCurrentIndex(i)
 
     def _send_to_kozu(self, city, daiji, chiban):
         from qgis.utils import plugins as _qplugins
@@ -1038,6 +1221,28 @@ class HoanrinMixin:
             return
         daiji = self._strip_ward_prefix(daiji)  # 「葵区井川」→「井川」（Kozu側は区名なし）
         ok, message, keep_ids, keep_munis = self._kozu_target_status(kozu, city, daiji)
+        if not ok:
+            # 大字名が公図と完全一致しないとき（例：計画図「大沢里」→公図「大沢里白川」「大沢里祢宜畑」、
+            # 計画図「西本郷１丁目」→公図「西本郷」）、名前の前の方が一致する公図の大字を候補にし、
+            # 地番があるもので1つに決まればそれを使う。決まらなければ知らせて止める
+            kind, value = self._kozu_resolve_oaza(kozu, city, daiji, chiban)
+            if kind == 'ambiguous':
+                cands, hit = value
+                names = '」「'.join(cands)
+                detail = (f'地番「{chiban}」がどちらにもあるため' if hit
+                          else f'地番「{chiban}」がどれにも見つからないため')
+                QMessageBox.information(
+                    self, '公図連携',
+                    f'大字「{daiji}」は、公図では「{names}」に分かれていて、{detail}、'
+                    'どの公図か決められません。\n\n'
+                    'Kozu XML Integrator で大字を選んでから、地番を検索してください。')
+                return
+            if kind == 'resolved':
+                ok, message, keep_ids, keep_munis = self._kozu_target_status(kozu, city, value)
+                if ok:
+                    self.iface.messageBar().pushInfo(
+                        '公図連携', f'大字「{daiji}」を、公図の「{value}」で検索しました。')
+                    daiji = value
         if not ok:
             QMessageBox.information(
                 self, '公図連携',

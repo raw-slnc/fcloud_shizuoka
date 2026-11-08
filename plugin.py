@@ -78,7 +78,8 @@ class FcloudShizuoka:
         """プロジェクトに保存されて残ったプラグイン由来のレイヤーを外す
         （起動時・プロジェクトを開いたとき）。"""
         stale_names = {
-            'fcloud_林道', 'fcloud_森の力実施箇所', 'fcloud_経営計画作成箇所',
+            'fcloud_林道', 'fcloud_整備事業_統合', 'fcloud_森の力実施箇所',
+            'fcloud_経営計画作成箇所',
             'fcloud_林地開発', '林地開発_許可', '林地開発_連絡調整',
         }
         project = QgsProject.instance()
