@@ -28,7 +28,7 @@ from .cache_db import CacheDB
 from .constants import (
     _API_BASE, _CITY_TO_NORIN, _TOGGLE_BTN_QSS_LAYER,
     _PRIMARY_FIELDS, _HISTORY_FIELDS,
-    _CD_API_PRIMARY_FIELDS, _CD_API_HISTORY_FIELDS,
+    _CD_API_PRIMARY_FIELDS,
     _OWNER_FIELDS, _OWNER_LABEL, _OWNER_SOURCE_TITLE,
 )
 from .layer_cleanup import remove_project_layer
@@ -565,6 +565,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         reply = QgsNetworkAccessManager.instance().get(req)
         self._pending_replies.append(reply)
         reply.finished.connect(lambda: self._handle_binary_reply(reply, callback))
+        return reply
 
     def _handle_binary_reply(self, reply, callback):
         data = None
@@ -587,6 +588,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         reply = QgsNetworkAccessManager.instance().get(req)
         self._pending_replies.append(reply)
         reply.finished.connect(lambda: self._handle_reply(reply, callback))
+        return reply
 
     def _on_cd_api_result(self, data):
         if data is None:
@@ -595,30 +597,16 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             )
             return
         parts = ['<table style="border-collapse:collapse;width:100%;">']
-        parts.append(self._info_title_row('基本情報（森林クラウド）'))
+        parts.append(self._info_title_row('森林クラウド情報'))
         for src, label in _CD_API_PRIMARY_FIELDS:
             val = data.get(src)
-            if val is None or str(val) in ('', 'NULL', '0', 'None'):
-                continue
+            text = '' if val is None or str(val) in ('NULL', 'None') else str(val)
+            if '年度' in src and text == '0':
+                text = ''
             parts.append(
                 f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;">'
-                f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
-        hist_rows = []
-        for y_f, m_f, e_f in _CD_API_HISTORY_FIELDS:
-            yr = data.get(y_f)
-            if not yr or str(yr) in ('0', '', 'NULL', 'None'):
-                continue
-            method = data.get(m_f) or ''
-            etype  = data.get(e_f) or ''
-            if not method and not etype:
-                continue
-            hist_rows.append(
-                f'<tr><td colspan="2" style="padding:2px 4px;'
-                f'border-bottom:1px solid #eee;">'
-                f'{yr}年度: {method}（{etype}）</td></tr>')
-        if hist_rows:
-            parts.append(self._info_title_row('施業履歴'))
-            parts.extend(hist_rows)
+                f'{html.escape(label)}</td><td style="padding:1px 4px;">'
+                f'{html.escape(text)}</td></tr>')
         parts.append('</table>')
         self.info_browser.setHtml(''.join(parts))
 
@@ -855,9 +843,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 layer = self._connected_layer
                 if layer is not None and not sip.isdeleted(layer):
                     self._refresh_shinrinbo_tab(
-                        self._selected_features_head() if self._layer_type == 'gpkg'
+                        self._selected_features_head() if self._shinrinbo_uses_local_layer()
                         else self._selected_features_sorted())
-            if self._layer_type == 'gpkg':
+            if self._shinrinbo_uses_local_layer():
                 self.lbl_cache_ts.setText('ローカルデータ')
             elif self._current_shinrinbo_key:
                 db = self._get_db('森林簿')
@@ -953,9 +941,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.btn_cache_save.setEnabled(False)
             self.btn_cache_update.setEnabled(False)
         elif tab == 0:
-            # 森林簿: 自動保存のためローカル保存不要。更新はAPIレイヤー選択時のみ有効
+            # 森林簿: クラウド表示は自動保存。ローカル表示では更新不要。
             self.btn_cache_save.setEnabled(False)
-            can_update = (self._layer_type != 'gpkg'
+            can_update = (not self._shinrinbo_uses_local_layer()
                           and bool(self._current_shinrinbo_key)
                           and not no_data)
             self.btn_cache_update.setEnabled(can_update)
@@ -997,7 +985,7 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
             self.lbl_cache_ts.setText('取得日時: 更新中...')
             self._search_rinchi(force=True, save_to_db=True)
         elif tab == 0:
-            if self._layer_type != 'gpkg' and self._shinrinbo_api_ids:
+            if not self._shinrinbo_uses_local_layer() and self._shinrinbo_api_ids:
                 self._update_shinrinbo_cache()
 
     # ------------------------------------------------------------------
@@ -1262,8 +1250,9 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         # 表を作らなければ、左パネルに出す先頭の1件だけ読めばよい（全件選択でも軽い）。
         # パネルを開いたときも、残っている選択をここで処理し直すので、全件選択のままでも固まらない
         defer_shinrinbo = self.cloud_tab.currentIndex() != 0
-        # gpkg 型の森林簿の表は、選択中の小班を表のモデルが自分で読むので、ここでは先頭の1件だけでよい
-        if defer_shinrinbo or self._layer_type == 'gpkg':
+        # ローカル表示は表モデルが選択IDを読むため先頭1件でよい。
+        # 森林クラウド表示は、表を開いているときだけ選択小班をすべてAPI結果へ対応付ける。
+        if defer_shinrinbo or self._shinrinbo_uses_local_layer():
             features = self._selected_features_head()
         else:
             features = self._selected_features_sorted()
@@ -1587,8 +1576,10 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
         return ('<tr><td colspan="2" style="background:#e8f4e8;font-weight:bold;'
                 f'padding:3px;">{title}</td></tr>')
 
-    def _show_cloud_table_row_info(self, title, table, row, owner_feat=None):
-        """owner_feat を渡すと、クラウドの情報の後に区切りと所有者情報を続ける。"""
+    def _show_cloud_table_row_info(self, title, table, row, owner_feat=None,
+                                   show_empty=False):
+        """owner_feat を渡すと、クラウドの情報の後に区切りと所有者情報を続ける。
+        show_empty=True は本家サイトと同じ項目構成を保つため、値が空の行も出す。"""
         if table is None or row < 0:
             self._clear_cloud_record_info()
             return
@@ -1603,11 +1594,12 @@ class FcloudWindow(HoanrinMixin, MoriMixin, KeikakuMixin, RinchiMixin, Shinrinbo
                 continue
             label = str(header).strip()
             val = str(value).strip()
-            if not label or val == '':
+            if not label or (val == '' and not show_empty):
                 continue
             parts.append(
                 f'<tr><td style="color:gray;padding:1px 4px;white-space:nowrap;vertical-align:top;">'
-                f'{label}</td><td style="padding:1px 4px;">{val}</td></tr>')
+                f'{html.escape(label)}</td><td style="padding:1px 4px;">'
+                f'{html.escape(val)}</td></tr>')
         parts.append('</table>')
         self._set_cloud_info(parts, owner_feat)
         self.left_tab.setCurrentIndex(1)

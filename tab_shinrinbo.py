@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
+import csv
 import math
+import os
 from qgis.PyQt import sip
 import struct
 
 from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableView,
-    QHeaderView, QFrame, QPushButton, QAbstractItemView,
+    QHeaderView, QFrame, QPushButton, QAbstractItemView, QLabel,
+    QFileDialog, QMessageBox,
 )
 from qgis.PyQt.QtCore import Qt, QAbstractTableModel, QModelIndex
 from qgis.core import (
@@ -16,50 +19,23 @@ from qgis.core import (
 from .constants import (
     _API_BASE, _TOGGLE_BTN_QSS_ONOFF,
     _PRIMARY_FIELDS, _HISTORY_FIELDS, _MORINBO_OLD_CD_TO_CITY, _SHINRINBO_COL_WIDTHS,
+    _SHINRINBO_CLOUD_FIELDS,
 )
 
 _MVT_BASE = 'https://fcloud.pref.shizuoka.jp'
 _MVT_PATH = '/MAP/MVT/MAGIS.SHOHAN_SHINRINBO.5JOU'
+_MAX_SHINRINBO_REQUESTS = 6
 
-# API応答の表示列（順序固定・全列常時表示）
-_API_TABLE_COLS = [
-    ('計画区',               '計画区'),
-    ('市町村',               '市町村'),
-    ('林班',                 '林班'),
-    ('準林班',               '準林班'),
-    ('小班ラベル',           '小班'),
-    ('小班_枝番',            '枝番'),
-    ('大字',                 '大字'),
-    ('表示用_地番',          '地番'),
-    ('面積',                 '面積(ha)'),
-    ('林種',                 '林種'),
-    ('樹種',                 '樹種'),
-    ('林齢',                 '林齢'),
-    ('齢級',                 '齢級'),
-    ('林地の生産力',         '林地生産力'),
-    ('ゾーニング',           'ゾーニング'),
-    ('施業種',               '施業種'),
-    ('新特定施業森林',       '新特定施業森林'),
-    ('表示用_材積',          '材積(m³)'),
-    ('表示用_成長量',        '成長量(m³)'),
-    ('道からの距離',         '道からの距離(m)'),
-    ('土壌１名称',           '土壌'),
-    ('施業履歴_施業年度１',  '施業年度1'),
-    ('施業履歴_施業方法１',  '施業方法1'),
-    ('施業履歴_事業種別１',  '事業種別1'),
-    ('施業履歴_施業年度２',  '施業年度2'),
-    ('施業履歴_施業方法２',  '施業方法2'),
-    ('施業履歴_事業種別２',  '事業種別2'),
-    ('施業履歴_施業年度３',  '施業年度3'),
-    ('施業履歴_施業方法３',  '施業方法3'),
-    ('施業履歴_事業種別３',  '事業種別3'),
-    ('施業履歴_施業年度４',  '施業年度4'),
-    ('施業履歴_施業方法４',  '施業方法4'),
-    ('施業履歴_事業種別４',  '事業種別4'),
-    ('施業履歴_施業年度５',  '施業年度5'),
-    ('施業履歴_施業方法５',  '施業方法5'),
-    ('施業履歴_事業種別５',  '事業種別5'),
-]
+# API応答は、本家サイトと同じ列順の共通定義で表示する。
+_API_TABLE_COLS = _SHINRINBO_CLOUD_FIELDS
+
+_API_CENTER_SOURCES = {'林班', '準林班', '小班ラベル', '小班_枝番'}
+_API_RIGHT_SOURCES = {
+    '混合歩合', '林齢', '齢級',
+    '表示用_面積', '表示用_材積', '表示用_成長量',
+    '道からの距離', '施業年度',
+    '表示用_割合１', '表示用_割合２', '表示用_割合３',
+}
 
 _NULL_DISPLAY = {'', 'NULL', 'None', None}
 
@@ -86,10 +62,18 @@ class _ShinrinboApiModel(QAbstractTableModel):
         return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+        if not index.isValid():
+            return None
+        src = self._cols[index.column()][0]
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if src in _API_CENTER_SOURCES:
+                return int(Qt.AlignmentFlag.AlignCenter)
+            if src in _API_RIGHT_SOURCES:
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         d = self._rows[index.row()] or {}
-        src = self._cols[index.column()][0]
         raw = d.get(src)
         text = '' if raw is None or str(raw) in _NULL_DISPLAY else str(raw)
         if '年度' in src and text == '0':
@@ -177,7 +161,30 @@ class ShinrinboMixin:
         v.setSpacing(4)
 
         row = QHBoxLayout()
+        self.lbl_shinrinbo_progress = QLabel()
+        self.lbl_shinrinbo_progress.setVisible(False)
+        self.lbl_shinrinbo_progress.setToolTip('森林クラウド情報の読み込み状況')
+        self.btn_cancel_shinrinbo = QPushButton('中止')
+        self.btn_cancel_shinrinbo.setToolTip('森林クラウド情報の読み込みを中止')
+        self.btn_cancel_shinrinbo.setVisible(False)
+        self.btn_shinrinbo_source = QPushButton('森林クラウド')
+        self.btn_shinrinbo_source.setToolTip(
+            '現在の表示元です。押すたびに「森林クラウド」と「森林簿」を切り替えます。')
+        # 表示名の長さが変わっても、公図連携ボタンの位置を動かさない。
+        cloud_width = self.btn_shinrinbo_source.sizeHint().width()
+        self.btn_shinrinbo_source.setText('森林簿')
+        local_width = self.btn_shinrinbo_source.sizeHint().width()
+        self.btn_shinrinbo_source.setFixedWidth(max(cloud_width, local_width))
+        self.btn_shinrinbo_source.setText('森林クラウド')
+        row.addWidget(self.btn_shinrinbo_source)
+        row.addWidget(self.lbl_shinrinbo_progress)
+        row.addWidget(self.btn_cancel_shinrinbo)
         row.addStretch(1)
+        self.btn_export_shinrinbo = QPushButton('CSVエクスポート')
+        self.btn_export_shinrinbo.setToolTip(
+            '現在の森林簿テーブルをCSVファイルに保存')
+        self.btn_export_shinrinbo.setEnabled(False)
+        row.addWidget(self.btn_export_shinrinbo)
         self.btn_kozu_shinrinbo = QPushButton('公図連携OFF')
         self.btn_kozu_shinrinbo.setCheckable(True)
         self.btn_kozu_shinrinbo.setStyleSheet(_TOGGLE_BTN_QSS_ONOFF)
@@ -211,9 +218,190 @@ class ShinrinboMixin:
 
         self.btn_kozu_shinrinbo.toggled.connect(
             lambda checked: self._on_kozu_toggled(checked, self.btn_kozu_shinrinbo))
+        self.btn_shinrinbo_source.clicked.connect(
+            self._on_shinrinbo_source_clicked)
+        self.btn_export_shinrinbo.clicked.connect(
+            self._export_shinrinbo_csv)
+        self.btn_cancel_shinrinbo.clicked.connect(self._cancel_shinrinbo_loading)
         self._shinrinbo_model_keep = ()
+        self._shinrinbo_source = 'cloud'
+        self._shinrinbo_active_source = 'cloud'
+        self._shinrinbo_replies = []
+        self._shinrinbo_progress_done = 0
+        self._shinrinbo_progress_total = 0
+        self._shinrinbo_loaded_feature_indexes = set()
+        self._shinrinbo_partial_results = []
+        self._shinrinbo_batch_api_ids = []
+        self._shinrinbo_cancel_requested = False
         self._clear_shinrinbo_table()
         return w
+
+    def _set_shinrinbo_progress(self, text='', done=None, total=None,
+                                cancellable=True):
+        """森林簿タブ上部の空き領域に、クラウド読込の件数と進捗を表示する。"""
+        label = getattr(self, 'lbl_shinrinbo_progress', None)
+        if label is None or sip.isdeleted(label):
+            return
+        cancel = getattr(self, 'btn_cancel_shinrinbo', None)
+        if not text:
+            self._shinrinbo_progress_done = 0
+            self._shinrinbo_progress_total = 0
+            label.clear()
+            label.setVisible(False)
+            if cancel is not None and not sip.isdeleted(cancel):
+                cancel.setVisible(False)
+            return
+        if total:
+            done = max(0, min(int(done or 0), int(total)))
+            pct = int(done * 100 / total)
+            self._shinrinbo_progress_done = done
+            self._shinrinbo_progress_total = int(total)
+            text = f'{text}… {done:,} / {total:,}件（{pct}%）'
+        label.setText(text)
+        label.setVisible(True)
+        if cancel is not None and not sip.isdeleted(cancel):
+            cancel.setVisible(cancellable)
+
+    def _track_shinrinbo_reply(self, reply):
+        """森林簿だけの通信を追跡し、ほかのタブを巻き込まず中止できるようにする。"""
+        if reply is None:
+            return
+        try:
+            if reply.isFinished():
+                return
+        except RuntimeError:
+            return
+        self._shinrinbo_replies.append(reply)
+
+        def forget_reply():
+            if reply in self._shinrinbo_replies:
+                self._shinrinbo_replies.remove(reply)
+
+        reply.finished.connect(forget_reply)
+
+    def _abort_shinrinbo_replies(self):
+        replies = list(getattr(self, '_shinrinbo_replies', []))
+        self._shinrinbo_replies = []
+        for reply in replies:
+            try:
+                if not sip.isdeleted(reply) and not reply.isFinished():
+                    reply.abort()
+            except RuntimeError:
+                pass
+        return len(replies)
+
+    def _cancel_shinrinbo_loading(self):
+        """中止を予約する。通信中のまとまりは完了させ、新しい要求は送らない。"""
+        if getattr(self, '_shinrinbo_cancel_requested', False):
+            return
+        self._shinrinbo_cancel_requested = True
+        done = getattr(self, '_shinrinbo_progress_done', 0)
+        total = getattr(self, '_shinrinbo_progress_total', 0)
+        self._set_shinrinbo_progress('中止処理中', done, total, cancellable=False)
+
+    def _finish_shinrinbo_cancellation(self):
+        """通信中だったまとまりが完了した時点で、未取得フィーチャーを選択解除する。"""
+        if not getattr(self, '_shinrinbo_cancel_requested', False):
+            return
+        total = getattr(self, '_shinrinbo_progress_total', 0)
+        self._shinrinbo_cancel_requested = False
+        self._shinrinbo_generation = getattr(self, '_shinrinbo_generation', 0) + 1
+        kept = self._keep_loaded_shinrinbo_selection()
+        text = f'読み込みを中止しました（{kept:,} / {total:,}件を取得）'
+        self._set_shinrinbo_progress(text, cancellable=False)
+        self._progress_end()
+        self._update_cache_btn_states()
+
+    def _keep_loaded_shinrinbo_selection(self):
+        """中止時、クラウド情報を取得済みの行だけ地図選択と表に残す。"""
+        layer = getattr(self, '_connected_layer', None)
+        row_features = list(getattr(self, '_shinrinbo_row_features', []))
+        results = list(getattr(self, '_shinrinbo_partial_results', []))
+        api_ids = list(getattr(self, '_shinrinbo_batch_api_ids', []))
+        indexes = sorted(getattr(self, '_shinrinbo_loaded_feature_indexes', set()))
+        indexes = [i for i in indexes
+                   if i < len(row_features) and i < len(results) and bool(results[i])]
+        keep_features = [row_features[i] for i in indexes]
+        keep_results = [results[i] for i in indexes]
+        keep_api_ids = [api_ids[i] for i in indexes if i < len(api_ids) and api_ids[i]]
+
+        if layer is not None and not sip.isdeleted(layer):
+            # selectionChanged を一時停止し、未取得フィーチャーの解除が
+            # 重なり小班の再選択として扱われないようにする。
+            layer.blockSignals(True)
+            try:
+                layer.removeSelection()
+                layer.selectByIds([f.id() for f in keep_features])
+            finally:
+                layer.blockSignals(False)
+
+        self._clicked_fid = keep_features[0].id() if keep_features else None
+        self._shinrinbo_row_features = keep_features
+        self._shinrinbo_api_ids = keep_api_ids
+        self._current_shinrinbo_key = (
+            f'森林簿/{keep_api_ids[-1]}' if keep_api_ids else '')
+        self._clear_selection_highlights()
+        self._clear_cloud_record_info()
+
+        if keep_features:
+            feat = keep_features[0]
+            fnames = feat.fields().names()
+            if self._layer_type == 'shp':
+                key1 = feat['KEY1'] if 'KEY1' in fnames else ''
+                self.lbl_selected.setText(f'小班: {key1}')
+            elif self._layer_type == 'cd_gpkg':
+                rinpan = feat['林班'] if '林班' in fnames else ''
+                junrin = feat['準林班CD'] if '準林班CD' in fnames else ''
+                kohan = feat['小班_親番'] if '小班_親番' in fnames else ''
+                self.lbl_selected.setText(f'小班: {rinpan}-{junrin}-{kohan}')
+            else:
+                rinpan = feat['林班_森林簿'] if '林班_森林簿' in fnames else ''
+                junrin = feat['準林班名称'] if '準林班名称' in fnames else ''
+                kohan = feat['小班_親番_森林簿'] if '小班_親番_森林簿' in fnames else ''
+                self.lbl_selected.setText(f'小班: {rinpan}-{junrin}-{kohan}')
+            if self._layer_type in ('cd_gpkg', 'shp'):
+                self._track_owner_info(None)
+                self._on_cd_api_result(keep_results[0])
+            else:
+                self._show_feature_info(feat)
+            self.left_tab.setCurrentIndex(0)
+            self._shinrinbo_active_source = 'cloud'
+            self._build_shinrinbo_table_api(keep_results)
+        else:
+            self.lbl_selected.setText('計画図レイヤーで選択してください')
+            self.info_browser.clear()
+            self._track_owner_info(None)
+            self._clear_shinrinbo_table()
+
+        self._od_on_plan_selection()
+        return len(keep_features)
+
+    def _shinrinbo_uses_local_layer(self):
+        """完全な森林簿GPKGで、利用者がローカル表示を選んだときだけ True。"""
+        return (self._layer_type == 'gpkg'
+                and getattr(self, '_shinrinbo_source', 'cloud') == 'local')
+
+    def _set_shinrinbo_source(self, source):
+        """表示元を保持し、ボタンに現在のモードを表示する。"""
+        self._shinrinbo_source = 'local' if source == 'local' else 'cloud'
+        btn = getattr(self, 'btn_shinrinbo_source', None)
+        if btn is not None:
+            btn.setText('森林簿' if self._shinrinbo_source == 'local'
+                        else '森林クラウド')
+
+    def _on_shinrinbo_source_clicked(self):
+        """表示元を切り替える。地図の選択は変えず、表だけを作り直す。"""
+        self._set_shinrinbo_source(
+            'cloud' if self._shinrinbo_uses_local_layer() else 'local')
+        self._init_shinrinbo_headers()
+        layer = getattr(self, '_connected_layer', None)
+        if layer is None or sip.isdeleted(layer) or not layer.selectedFeatureIds():
+            self._refresh_shinrinbo_tab([])
+            return
+        features = (self._selected_features_head()
+                    if self._shinrinbo_uses_local_layer()
+                    else self._selected_features_sorted())
+        self._refresh_shinrinbo_tab(features)
 
     # ------------------------------------------------------------------
     # 表のモデルの差し替え
@@ -226,12 +414,56 @@ class ShinrinboMixin:
         old_sel = table.selectionModel()
         old = getattr(self, '_shinrinbo_model_keep', ())
         table.setModel(model)
+        self.btn_export_shinrinbo.setEnabled(
+            model.rowCount(QModelIndex()) > 0
+            and model.columnCount(QModelIndex()) > 0)
         self._shinrinbo_model_keep = (model,) + tuple(keep)
         table.selectionModel().selectionChanged.connect(self._on_shinrinbo_row_selected)
         for obj in (old_sel,) + tuple(old):
             if obj is not None and not sip.isdeleted(obj):
                 obj.deleteLater()
         self._apply_shinrinbo_col_widths()
+
+    def _export_shinrinbo_csv(self):
+        """現在表示中の森林簿テーブルを、表示順のままCSVに書き出す。"""
+        model = self.tbl_shinrinbo.model()
+        rows = model.rowCount(QModelIndex()) if model is not None else 0
+        cols = model.columnCount(QModelIndex()) if model is not None else 0
+        if rows <= 0 or cols <= 0:
+            return
+
+        source_name = getattr(self, 'btn_shinrinbo_source', None)
+        source_name = source_name.text() if source_name is not None else '森林簿'
+        initial_path = os.path.join(os.path.expanduser('~'), f'{source_name}.csv')
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'CSVエクスポート', initial_path, 'CSVファイル (*.csv)')
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+
+        try:
+            with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    model.headerData(c, Qt.Orientation.Horizontal,
+                                     Qt.ItemDataRole.DisplayRole) or ''
+                    for c in range(cols)
+                ])
+                for r in range(rows):
+                    writer.writerow([
+                        model.data(model.index(r, c), Qt.ItemDataRole.DisplayRole) or ''
+                        for c in range(cols)
+                    ])
+        except (OSError, UnicodeError) as exc:
+            QMessageBox.warning(
+                self, 'CSVエクスポート',
+                f'CSVファイルを保存できませんでした。\n\n{exc}')
+            return
+
+        QMessageBox.information(
+            self, 'CSVエクスポート',
+            f'{rows}件を保存しました。\n\n{path}')
 
     def _apply_shinrinbo_col_widths(self):
         """列幅を、列ごとに決めた幅（_SHINRINBO_COL_WIDTHS の文字列が入る幅）にする。
@@ -259,33 +491,43 @@ class ShinrinboMixin:
     # ヘッダー確定（レイヤー選択時に一度だけ呼ぶ）
     # ------------------------------------------------------------------
 
+    def _local_shinrinbo_col_map(self):
+        """接続中の完全な森林簿GPKGに実在する、ローカル表示用の列。"""
+        if self._layer_type != 'gpkg':
+            return []
+        layer = self._connected_layer
+        existing = set()
+        if layer is not None and not sip.isdeleted(layer):
+            try:
+                existing = {f.name() for f in layer.fields()}
+            except RuntimeError:
+                pass  # チェック後にレイヤーが削除された場合のみ発生
+        col_map = [
+            (src, label) for src, label in _PRIMARY_FIELDS
+            if src in existing
+        ]
+        for i, (y_f, m_f, e_f) in enumerate(_HISTORY_FIELDS):
+            if y_f in existing:
+                n = str(i + 1)
+                col_map += [
+                    (y_f, f'施業年度{n}'),
+                    (m_f, f'施業方法{n}'),
+                    (e_f, f'事業種別{n}'),
+                ]
+        return col_map
+
     def _init_shinrinbo_headers(self):
-        """_layer_type に基づきヘッダー列を確定する。フィーチャー選択では呼ばない。"""
-        if self._layer_type == 'gpkg':
-            layer = self._connected_layer
-            existing = set()
-            if layer is not None and not sip.isdeleted(layer):
-                try:
-                    existing = {f.name() for f in layer.fields()}
-                except RuntimeError:
-                    pass  # チェック後にレイヤーが削除された場合のみ発生
-            col_map = [
-                (src, label) for src, label in _PRIMARY_FIELDS
-                if src in existing
-            ]
-            for i, (y_f, m_f, e_f) in enumerate(_HISTORY_FIELDS):
-                if y_f in existing:
-                    n = str(i + 1)
-                    col_map += [
-                        (y_f, f'施業年度{n}'),
-                        (m_f, f'施業方法{n}'),
-                        (e_f, f'事業種別{n}'),
-                    ]
-            self._shinrinbo_col_map = col_map
+        """表示元とレイヤー種別に基づきヘッダー列を確定する。"""
+        btn = getattr(self, 'btn_shinrinbo_source', None)
+        if btn is not None:
+            btn.setEnabled(self._layer_type == 'gpkg')
+            if self._layer_type != 'gpkg':
+                self._set_shinrinbo_source('cloud')
 
-        elif self._layer_type in ('cd_gpkg', 'shp'):
+        if self._shinrinbo_uses_local_layer():
+            self._shinrinbo_col_map = self._local_shinrinbo_col_map()
+        elif self._layer_type in ('gpkg', 'cd_gpkg', 'shp'):
             self._shinrinbo_col_map = list(_API_TABLE_COLS)
-
         else:
             self._shinrinbo_col_map = []
 
@@ -298,14 +540,22 @@ class ShinrinboMixin:
     def _refresh_shinrinbo_tab(self, features):
         """features：選択中の小班。gpkg 型は表を選択中の小班すべてから作るので、空かどうかだけを見る
         （呼び出し元は先頭の1件だけ読めばよい）。cd_gpkg 型は、この地物から森林クラウドの森林簿を取る。"""
+        self._shinrinbo_generation = getattr(self, '_shinrinbo_generation', 0) + 1
+        gen = self._shinrinbo_generation
+        self._shinrinbo_cancel_requested = False
+        self._abort_shinrinbo_replies()
         self._update_kozu_btn(self.btn_kozu_shinrinbo)
         self._current_shinrinbo_key = ''
         self._shinrinbo_api_ids = []
-        self._shinrinbo_row_features = list(features or []) if self._layer_type != 'gpkg' else []
-        self._shinrinbo_generation = getattr(self, '_shinrinbo_generation', 0) + 1
-        gen = self._shinrinbo_generation
-
+        self._shinrinbo_loaded_feature_indexes = set()
+        self._shinrinbo_partial_results = []
+        self._shinrinbo_batch_api_ids = []
+        use_local = self._shinrinbo_uses_local_layer()
+        # 森林クラウドの各行を、元になった計画図フィーチャーへ対応付ける。
+        # 行選択時のハイライトと、ローカル所有者情報の追記に使う。
+        self._shinrinbo_row_features = [] if use_local else list(features or [])
         if not features:
+            self._set_shinrinbo_progress()
             self._clear_shinrinbo_table()
             self._clear_selection_highlights()
             self._clear_cloud_record_info()
@@ -318,7 +568,9 @@ class ShinrinboMixin:
         self._clear_selection_highlights()
         self._clear_cloud_record_info()
 
-        if self._layer_type == 'gpkg':
+        if use_local:
+            self._set_shinrinbo_progress()
+            self._shinrinbo_active_source = 'local'
             self._build_shinrinbo_table_layer()
             self._sync_shinrinbo_cache_ts('ローカルデータ')
             self._update_cache_btn_states()
@@ -327,10 +579,14 @@ class ShinrinboMixin:
 
         # cd_gpkg: 2段階
         # Stage 1: KEY1 → THE_FID (MVT タイル)
-        self._sync_shinrinbo_cache_ts('小班ID解決中...')
+        self._sync_shinrinbo_cache_ts('取得日時: —')
+        self._set_shinrinbo_progress('小班IDを確認中', 0, len(features))
 
         def on_fids_resolved(fid_list):
             if self._shinrinbo_generation != gen:
+                return
+            if self._shinrinbo_cancel_requested:
+                self._finish_shinrinbo_cancellation()
                 return
             api_ids = [str(f) if f is not None else None for f in fid_list]
             self._shinrinbo_api_ids = [a for a in api_ids if a]
@@ -340,7 +596,7 @@ class ShinrinboMixin:
             self._fetch_shinrinbo_batch(api_ids, gen, force=False)
 
         self._resolve_fids_via_mvt(features, on_fids_resolved)
-        self._progress_end()  # 画面の処理の中で行う分（小班の位置の計算）はここまで。取得の進み具合は下部の取得日時の欄に出る
+        self._progress_end()  # 同期処理用の共通表示はここまで。以後の通信進捗は森林簿タブ上部に出す
 
     # ------------------------------------------------------------------
     # MVT タイルで KEY1 → THE_FID を一括解決
@@ -351,6 +607,7 @@ class ShinrinboMixin:
         世代チェックは呼び出し元の on_done 内で行うこと。"""
         n = len(features)
         fid_list = [None] * n
+        resolve_gen = self._shinrinbo_generation
 
         tile_groups = {}
         for i, feat in enumerate(features):
@@ -370,16 +627,26 @@ class ShinrinboMixin:
             tile_groups.setdefault(tile_key, []).append((i, key1))
 
         if not tile_groups:
+            self._set_shinrinbo_progress('小班IDを確認中', n, n)
             on_done(fid_list)
             return
 
         pending = [len(tile_groups)]
+        resolved = [n - sum(len(items) for items in tile_groups.values())]
         mvt_cache = getattr(self, '_mvt_tile_cache', {})
 
         def process_tile(tile_key, mapping):
+            if self._shinrinbo_generation != resolve_gen:
+                return
             for idx, key1 in tile_groups[tile_key]:
                 if key1 in mapping:
                     fid_list[idx] = mapping[key1]
+            resolved[0] += len(tile_groups[tile_key])
+            progress_text = ('中止処理中' if self._shinrinbo_cancel_requested
+                             else '小班IDを確認中')
+            self._set_shinrinbo_progress(
+                progress_text, resolved[0], n,
+                cancellable=not self._shinrinbo_cancel_requested)
             pending[0] -= 1
             if pending[0] == 0:
                 on_done(fid_list)
@@ -398,7 +665,8 @@ class ShinrinboMixin:
                         process_tile(tk, mapping)
                     return cb
 
-                self._get_binary(url, make_cb(tile_key))
+                reply = self._get_binary(url, make_cb(tile_key))
+                self._track_shinrinbo_reply(reply)
 
     def _feature_centroid_wgs84(self, feat):
         try:
@@ -542,11 +810,32 @@ class ShinrinboMixin:
     def _fetch_shinrinbo_batch(self, api_ids, gen, force=False):
         n = len(api_ids)
         results = [None] * n
-        pending = [0]
+        self._shinrinbo_partial_results = results
+        self._shinrinbo_batch_api_ids = list(api_ids)
+        self._shinrinbo_loaded_feature_indexes = set()
+        completed = [0]
+        active = [0]
+        next_request = [0]
+        finished = [False]
+        requests = []
+        progress_text = '森林クラウドを更新中' if force else '森林クラウドを取得中'
+        self._set_shinrinbo_progress(progress_text, 0, n)
 
         def on_done():
-            if self._shinrinbo_generation != gen:
+            if finished[0] or self._shinrinbo_generation != gen:
                 return
+            finished[0] = True
+            self._set_shinrinbo_progress()
+            # 完全な森林簿GPKGでは、クラウドから1件も取れなかった場合だけ
+            # ローカル属性へ自動的に退避する。表示元は状態欄で明示する。
+            if (self._layer_type == 'gpkg' and not any(bool(r) for r in results)):
+                self._shinrinbo_active_source = 'local_fallback'
+                self._set_shinrinbo_source('local')
+                self._build_shinrinbo_table_layer(self._local_shinrinbo_col_map())
+                self._sync_shinrinbo_cache_ts('ローカルデータ（森林クラウド取得不可）')
+                self._update_cache_btn_states()
+                return
+            self._shinrinbo_active_source = 'cloud'
             self._build_shinrinbo_table_api(results)
             last_id = next((aid for aid in reversed(api_ids) if aid), None)
             ts_text = '取得日時: —'
@@ -559,43 +848,65 @@ class ShinrinboMixin:
             self._sync_shinrinbo_cache_ts(ts_text)
             self._update_cache_btn_states()
 
+        db = self._get_db('森林簿')
         for i, api_id in enumerate(api_ids):
             if api_id is None:
                 results[i] = {}
+                completed[0] += 1
+                self._set_shinrinbo_progress(progress_text, completed[0], n)
                 continue
             cache_key = f'森林簿/{api_id}'
-            if not force:
-                db = self._get_db('森林簿')
-                if db is not None:
-                    cached, _ = db.get(cache_key)
-                    if cached is not None:
-                        results[i] = cached
-                        continue
-            pending[0] += 1
+            if not force and db is not None:
+                cached, _ = db.get(cache_key)
+                if cached is not None:
+                    results[i] = cached
+                    if cached:
+                        self._shinrinbo_loaded_feature_indexes.add(i)
+                    completed[0] += 1
+                    self._set_shinrinbo_progress(progress_text, completed[0], n)
+                    continue
+            requests.append((i, api_id, cache_key))
 
-            def make_cb(idx, key, gen_cap):
-                def cb(data):
-                    if self._shinrinbo_generation != gen_cap:
+        def launch_more():
+            if (self._shinrinbo_generation != gen
+                    or self._shinrinbo_cancel_requested):
+                return
+            while (active[0] < _MAX_SHINRINBO_REQUESTS
+                   and next_request[0] < len(requests)):
+                idx, api_id, cache_key = requests[next_request[0]]
+                next_request[0] += 1
+                active[0] += 1
+
+                def cb(data, idx=idx, key=cache_key):
+                    if self._shinrinbo_generation != gen:
                         return
                     results[idx] = data or {}
+                    if data and db is not None:
+                        db.put(key, data)
                     if data:
-                        db2 = self._get_db('森林簿')
-                        if db2:
-                            db2.put(key, data)
-                    pending[0] -= 1
-                    if pending[0] == 0:
+                        self._shinrinbo_loaded_feature_indexes.add(idx)
+                    completed[0] += 1
+                    active[0] -= 1
+                    stopping = self._shinrinbo_cancel_requested
+                    self._set_shinrinbo_progress(
+                        '中止処理中' if stopping else progress_text,
+                        completed[0], n, cancellable=not stopping)
+                    if stopping:
+                        if active[0] == 0:
+                            self._finish_shinrinbo_cancellation()
+                        return
+                    launch_more()
+                    if completed[0] == n:
                         on_done()
-                return cb
 
-            self._get_api(
-                f'{_API_BASE}/advanced-search/森林簿/{api_id}',
-                make_cb(i, cache_key, gen),
-            )
+                reply = self._get_api(
+                    f'{_API_BASE}/advanced-search/森林簿/{api_id}', cb)
+                self._track_shinrinbo_reply(reply)
 
-        if pending[0] == 0:
+        if completed[0] == n:
             on_done()
         else:
-            self._sync_shinrinbo_cache_ts('取得中...')
+            launch_more()
 
     # ------------------------------------------------------------------
     # 更新ボタン
@@ -605,7 +916,8 @@ class ShinrinboMixin:
         if not self._shinrinbo_api_ids:
             return
         self._shinrinbo_generation = getattr(self, '_shinrinbo_generation', 0) + 1
-        self.lbl_cache_ts.setText('取得日時: 更新中...')
+        self._shinrinbo_cancel_requested = False
+        self._abort_shinrinbo_replies()
         self._fetch_shinrinbo_batch(
             self._shinrinbo_api_ids,
             self._shinrinbo_generation,
@@ -616,7 +928,7 @@ class ShinrinboMixin:
     # テーブル行更新（ヘッダーは変えない）
     # ------------------------------------------------------------------
 
-    def _build_shinrinbo_table_layer(self):
+    def _build_shinrinbo_table_layer(self, col_map=None):
         """計画図レイヤー（gpkg 型）で選択中の小班の森林簿の表を作る。表のモデルが持つのは小班の ID の一覧だけで、
         属性は見えている行の分だけ読むので、選んだ小班が多くても表はすぐ出る。
         形状は読まない（行を選んだときにその小班だけ読む）。行の並びは地物の番号順。"""
@@ -626,7 +938,8 @@ class ShinrinboMixin:
             return
         table = self.tbl_shinrinbo
         model = _ShinrinboLayerModel(
-            layer, sorted(layer.selectedFeatureIds()), getattr(self, '_shinrinbo_col_map', []), table)
+            layer, sorted(layer.selectedFeatureIds()),
+            col_map if col_map is not None else getattr(self, '_shinrinbo_col_map', []), table)
         self._set_shinrinbo_model(model)
         table.clearSelection()
 
@@ -660,17 +973,18 @@ class ShinrinboMixin:
             row_data = feature
         else:
             row_data = model.row_data(row) if isinstance(model, _ShinrinboApiModel) else None
-        if row_data is None:
-            self._clear_cloud_record_info()
-            return
-        # gpkg 型は行の地物を持っている。その小班の所有者情報をクラウドの情報に続けて出す
-        owner_feat = row_data if self._layer_type == 'gpkg' else None
-        self._show_cloud_table_row_info('森林簿', self.tbl_shinrinbo, row, owner_feat)
-
-        if feature is None:
             row_features = getattr(self, '_shinrinbo_row_features', [])
             if 0 <= row < len(row_features):
                 feature = row_features[row]
+        if row_data is None:
+            self._clear_cloud_record_info()
+            return
+        # 森林クラウドの行にも、対応するローカル小班の所有者情報だけを出どころを分けて続ける。
+        owner_feat = feature if self._layer_type == 'gpkg' else None
+        is_cloud = isinstance(model, _ShinrinboApiModel)
+        self._show_cloud_table_row_info(
+            '森林クラウド情報' if is_cloud else 'ローカル森林簿情報',
+            self.tbl_shinrinbo, row, owner_feat, show_empty=is_cloud)
         if feature is not None:
             try:
                 geom = feature.geometry()
@@ -685,7 +999,11 @@ class ShinrinboMixin:
             return
 
         if self._layer_type == 'gpkg':
-            feat = row_data
+            # 表示中の行が森林クラウドの dict でも、公図連携に使うのは
+            # その行へ対応付けて保持しているローカル森林簿フィーチャー。
+            feat = feature
+            if feat is None:
+                return
             fnames = feat.fields().names()
             city  = str(feat['市町村名称'] or '').strip() if '市町村名称' in fnames else ''
             # 旧市町村区分（旧井川村・旧静岡市… の飾り付き表記）は市町村CDで
