@@ -578,7 +578,7 @@ class ShinrinboMixin:
             return
 
         # cd_gpkg: 2段階
-        # Stage 1: KEY1 → THE_FID (MVT タイル)
+        # Stage 1: KEY1＋整理番号 → THE_FID (MVT タイル)
         self._sync_shinrinbo_cache_ts('取得日時: —')
         self._set_shinrinbo_progress('小班IDを確認中', 0, len(features))
 
@@ -599,11 +599,14 @@ class ShinrinboMixin:
         self._progress_end()  # 同期処理用の共通表示はここまで。以後の通信進捗は森林簿タブ上部に出す
 
     # ------------------------------------------------------------------
-    # MVT タイルで KEY1 → THE_FID を一括解決
+    # MVT タイルで KEY1＋整理番号 → THE_FID を一括解決
     # ------------------------------------------------------------------
 
     def _resolve_fids_via_mvt(self, features, on_done):
-        """KEY1 → THE_FID を MVT タイルで解決。完了後 on_done(fid_list) を呼ぶ。
+        """KEY1と整理番号 → THE_FID を MVT タイルで解決。
+        同じ KEY1 に整理番号違いの森林簿が複数ある場合も、
+        各ローカルフィーチャーに対応する THE_FID を返す。
+        完了後 on_done(fid_list) を呼ぶ。
         世代チェックは呼び出し元の on_done 内で行うこと。"""
         n = len(features)
         fid_list = [None] * n
@@ -624,7 +627,8 @@ class ShinrinboMixin:
             lon, lat = centroid
             tx, ty = self._tile_xyz(lon, lat, 13)
             tile_key = (13, tx, ty)
-            tile_groups.setdefault(tile_key, []).append((i, key1))
+            record_key = self._feature_shinrinbo_record_key(feat)
+            tile_groups.setdefault(tile_key, []).append((i, key1, record_key))
 
         if not tile_groups:
             self._set_shinrinbo_progress('小班IDを確認中', n, n)
@@ -638,9 +642,26 @@ class ShinrinboMixin:
         def process_tile(tile_key, mapping):
             if self._shinrinbo_generation != resolve_gen:
                 return
-            for idx, key1 in tile_groups[tile_key]:
-                if key1 in mapping:
-                    fid_list[idx] = mapping[key1]
+            used = {}
+            for idx, key1, record_key in tile_groups[tile_key]:
+                candidates = mapping.get(key1, [])
+                # 古い形式のキャッシュが実行中に残っていても読めるようにする。
+                if not isinstance(candidates, list):
+                    candidates = [{'fid': candidates, 'record_key': (None, None)}]
+                used_fids = used.setdefault(key1, set())
+                chosen = None
+                if record_key != (None, None):
+                    chosen = next((c for c in candidates
+                                   if c.get('record_key') == record_key
+                                   and c.get('fid') not in used_fids), None)
+                if chosen is None:
+                    # 整理番号を持たない CD-only/SHP でも、同じ候補を
+                    # 重複使用せず、残っているレコードを順に対応付ける。
+                    chosen = next((c for c in candidates
+                                   if c.get('fid') not in used_fids), None)
+                if chosen is not None:
+                    fid_list[idx] = chosen.get('fid')
+                    used_fids.add(chosen.get('fid'))
             resolved[0] += len(tile_groups[tile_key])
             progress_text = ('中止処理中' if self._shinrinbo_cancel_requested
                              else '小班IDを確認中')
@@ -660,6 +681,8 @@ class ShinrinboMixin:
 
                 def make_cb(tk):
                     def cb(data):
+                        if self._shinrinbo_generation != resolve_gen:
+                            return
                         mapping = self._parse_mvt_key1_to_fid(data) if data else {}
                         self._mvt_tile_cache[tk] = mapping
                         process_tile(tk, mapping)
@@ -684,6 +707,31 @@ class ShinrinboMixin:
             return None
 
     @staticmethod
+    def _feature_shinrinbo_record_key(feat):
+        """ローカル森林簿の整理番号（親番、枝番）を返す。
+        Converter の新旧フィールド名のどちらでも読む。"""
+        names = feat.fields().names()
+
+        def value_of(candidates):
+            for name in candidates:
+                if name not in names:
+                    continue
+                value = feat[name]
+                text = '' if value is None else str(value).strip()
+                if text in _NULL_DISPLAY:
+                    continue
+                try:
+                    return str(int(float(text)))
+                except (TypeError, ValueError):
+                    return text
+            return None
+
+        return (
+            value_of(('整理番号_親番', '整理番号_')),
+            value_of(('整理番号_枝番', '整理番号1')),
+        )
+
+    @staticmethod
     def _tile_xyz(lon, lat, zoom=13):
         n = 2 ** zoom
         x = int((lon + 180) / 360 * n)
@@ -693,7 +741,7 @@ class ShinrinboMixin:
 
     @staticmethod
     def _parse_mvt_key1_to_fid(raw_bytes):
-        """MVT PBF を解析して {key1: the_fid} マッピングを返す"""
+        """MVT PBF を解析し、KEY1 ごとの THE_FID 候補をすべて返す。"""
         def read_varint(buf, pos):
             result = shift = 0
             while True:
@@ -789,8 +837,18 @@ class ShinrinboMixin:
                             for i in range(0, len(tags) - 1, 2)}
                     k1 = prop.get('KEY1')
                     fid = prop.get('THE_FID')
-                    if k1 and fid is not None and k1 not in mapping:
-                        mapping[k1] = int(fid)
+                    if not k1 or fid is None:
+                        continue
+                    parent = prop.get('整理番号_親番')
+                    branch = prop.get('整理番号_枝番')
+                    record_key = (
+                        None if parent is None else str(parent),
+                        None if branch is None else str(branch),
+                    )
+                    candidates = mapping.setdefault(str(k1), [])
+                    fid = int(fid)
+                    if not any(c['fid'] == fid for c in candidates):
+                        candidates.append({'fid': fid, 'record_key': record_key})
                 return mapping
             elif wtype == 2:
                 l, pos = read_varint(buf, pos)
